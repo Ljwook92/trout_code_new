@@ -24,6 +24,10 @@ Run notebooks in this order:
    - Reads `eda_outputs/master_table_new.csv`.
    - Extracts handcrafted texture features from scale images.
    - Saves `feature_outputs/texture_features_*.csv` and `feature_outputs/master_with_texture_features_*.csv`.
+3. `trout_age4_model_comparison.ipynb`
+   - Compares age4 models with fish-level train/test splitting.
+   - Runs length/weight-only, texture-only, and texture+length/weight RandomForest baselines.
+   - Includes optional CNN image-only and CNN+tabular fusion cells.
 
 The notebook defaults to:
 
