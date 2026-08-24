@@ -16,7 +16,14 @@ Expected HPC layout:
 └── labeling.xlsx
 ```
 
-Run `trout_new_dataset_eda.ipynb` first. It builds `eda_outputs/master_table_new.csv` by joining image paths, labels, fish length, and fish weight.
+Run notebooks in this order:
+
+1. `trout_new_dataset_eda.ipynb`
+   - Builds `eda_outputs/master_table_new.csv` by joining image paths, labels, fish length, and fish weight.
+2. `trout_texture_feature_extraction.ipynb`
+   - Reads `eda_outputs/master_table_new.csv`.
+   - Extracts handcrafted texture features from scale images.
+   - Saves `feature_outputs/texture_features_*.csv` and `feature_outputs/master_with_texture_features_*.csv`.
 
 The notebook defaults to:
 

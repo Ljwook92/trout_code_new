@@ -1,5 +1,6 @@
 .ipynb_checkpoints/
 eda_outputs/
+feature_outputs/
 outputs/
 simclr_clean_outputs/
 __pycache__/
