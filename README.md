@@ -28,6 +28,10 @@ Run notebooks in this order:
    - Compares age4 models with fish-level train/test splitting.
    - Runs length/weight-only, texture-only, and texture+length/weight RandomForest baselines.
    - Includes optional CNN image-only and CNN+tabular fusion cells.
+4. `trout_age4_image_only_models.ipynb`
+   - Focused notebook for the main research objective.
+   - Compares texture-only, CNN image-only, and CNN+texture fusion models.
+   - Does not use fish length or weight.
 
 The notebook defaults to:
 
