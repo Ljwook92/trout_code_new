@@ -32,6 +32,10 @@ Run notebooks in this order:
    - Focused notebook for the main research objective.
    - Compares texture-only, CNN image-only, and CNN+texture fusion models.
    - Does not use fish length or weight.
+5. `trout_age4_simclr_comparison.ipynb`
+   - Trains a SimCLR ResNet18 backbone and age4 classifier.
+   - Uses the same fish-level split policy.
+   - Compares SimCLR against the saved image-only model results.
 
 The notebook defaults to:
 
