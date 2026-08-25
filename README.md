@@ -36,6 +36,10 @@ Run notebooks in this order:
    - Trains a SimCLR ResNet18 backbone and age4 classifier.
    - Uses the same fish-level split policy.
    - Compares SimCLR against the saved image-only model results.
+6. `trout_age7_simclr.ipynb`
+   - Trains SimCLR and a 7-class classifier for labels 0 through 6.
+   - Keeps label 6 as the bad/not-readable/regenerated class.
+   - Uses scale images only and fish-level splitting.
 
 The notebook defaults to:
 
