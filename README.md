@@ -40,6 +40,10 @@ Run notebooks in this order:
    - Trains SimCLR and a 7-class classifier for labels 0 through 6.
    - Keeps label 6 as the bad/not-readable/regenerated class.
    - Uses scale images only and fish-level splitting.
+7. `trout_age6_simclr_45combined.ipynb`
+   - Trains SimCLR after combining original labels 4 and 5.
+   - Uses six target classes: 0, 1, 2, 3, 4/5 combined, and 6/bad.
+   - Uses scale images only and fish-level splitting.
 
 The notebook defaults to:
 
