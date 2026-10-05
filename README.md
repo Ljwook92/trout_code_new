@@ -55,3 +55,22 @@ LABEL_XLSX = ROOT_DIR / "labeling.xlsx"
 ```
 
 Data files and generated outputs are intentionally not tracked by git.
+
+## SimCLR Backbone and Texture Comparison
+
+`trout_age4_simclr_backbone_texture_comparison.ipynb` compares SimCLR ResNet18,
+SimCLR ResNet50, and SimCLR ResNet50 with image-derived texture features for
+readable scales: 0, 1, 2, and 3 or older. Bad is excluded from age training;
+the separate readable/bad gate is not trained in this notebook.
+
+This notebook defaults to `/home/jlc3q/data/Trout/trout_code_new`, matching the
+actual HPC checkout. Set `TROUT_TEXTURE_MASTER` or edit `INPUT_CSV` if existing
+full texture outputs are under `code_new` instead. Run the cohort audit first,
+then set `RUN_TRAINING=True` and run from the setup cell.
+
+All models share a saved fish-level train/validation/test manifest. SimCLR uses
+training fish only, and validation macro F1 selects the classifier checkpoint.
+ResNet50 image-only and texture fusion start from identical SimCLR weights.
+Outputs, preprocessing objects, test predictions and checkpoints are saved in
+`model_outputs/age4_backbone_texture_comparison`. Length and weight are excluded.
+Use a new output directory when changing the cohort or split configuration.
