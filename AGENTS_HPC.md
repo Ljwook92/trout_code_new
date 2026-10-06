@@ -8,7 +8,10 @@ Do not interpret fluent explanations as proof of correct annulus detection.
 
 One shared Qwen2.5-VL model runs separate roles sequentially:
 
-1. Quality agent: readable, bad, or uncertain, using slides 8, 9 and 13.
+1. Quality agent: readable, bad, or uncertain, using slides 8, 9 and 13. This
+   assesses physical/optical suitability, NOT whether the age is already known.
+   An uncertain gate receives one quality-only review; the reviewed decision
+   can remain uncertain or bad. Readable does not mean a completed annulus was found.
 2. Four independent class agents: 0, 1, 2, and 3 or older. Each checks evidence
    for and against its class without seeing the other class agents' answers.
 3. Adjudicator: sees the target, reference slides and class evidence; predicts
@@ -20,6 +23,25 @@ Slide 12 is a 4+ example within the 3-or-older class. Slide 13's `Not Ring` does
 not automatically mean bad; absence of an annulus can be normal for age 0.
 The references retain expert arrows, boxes and image crops. They are committed
 under `agent_references/`; no need to upload the full PPTX to HPC.
+
+### Quality-Scope Correction (v2)
+
+The initial pilot abstained on every image. Saved quality responses confused
+missing/uncertain annuli with image unusability. Version 2 separates the quality
+and age system prompts, requires an explicit quality reason type, and reviews
+uncertain gates without supplying GT. Age-reflection memory cannot redefine the
+quality gate. Quality metrics use the final reviewed gate, while both responses
+remain in the trace. There is no automatic uncertain-to-readable conversion.
+This fixes task instructions, not demonstrated VLM accuracy. Use a NEW output
+directory; old predictions and reflection rules are preserved, not rewritten.
+Start without memory or GT reflection to isolate the gate behavior:
+
+```bash
+python trout_agents.py run --split train --limit 5 --out agent_outputs/quality_scope_v2
+```
+
+If this pilot is usable, extend the same run with `--limit 20`. To collect GT
+reflection afterwards, use a different output directory with `--feedback`.
 
 ## Environment
 

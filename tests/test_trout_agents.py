@@ -14,15 +14,19 @@ class FakeVLM:
 
     def __init__(self, quality="readable"):
         self.calls = []
+        self.systems = []
         self.quality = quality
 
-    def generate(self, prompt, images):
+    def generate(self, prompt, images, system=None):
         self.calls.append((prompt, images))
+        self.systems.append(system)
         value = {"confidence": 0.5, "evidence": "Observed annulus candidate; uncertain."}
         if "TRAINING feedback" in prompt:
             value["candidate_rule"] = "Check whether an annulus candidate persists across sectors."
-        elif "Assess whether annuli" in prompt:
+        elif "QUALITY GATE:" in prompt or "QUALITY REVIEW:" in prompt:
             value["decision"] = self.quality
+            value["reason_type"] = {"readable": "none", "bad": "structural_damage", "uncertain": "unknown"}[self.quality]
+            value["evidence"] = "Center and texture are visible." if self.quality == "readable" else "Suitability defect."
         elif "Independently assess" in prompt:
             value["match"] = "uncertain"
         else:
@@ -78,7 +82,50 @@ class AgentTests(unittest.TestCase):
             backend = FakeVLM(decision)
             pred, trace = agents.VisualAgents(backend, refs, self.refs).predict(self.root / "scale0.png")
             self.assertEqual(pred, expected)
-            self.assertEqual(len(backend.calls), 1)
+            self.assertEqual(len(backend.calls), 1 if decision == "bad" else 2)
+
+    def test_age_uncertainty_review_is_not_forced_acceptance(self):
+        refs = agents.load_references(self.refs)
+        for review_decision, expected in [("readable", 0), ("bad", 4), ("uncertain", -1)]:
+            class ReviewVLM(FakeVLM):
+                def generate(self, prompt, images, system=None):
+                    response = json.loads(super().generate(prompt, images, system))
+                    if "QUALITY GATE:" in prompt:
+                        response.update(decision="uncertain", reason_type="age_only", evidence="missing annual annulus")
+                    elif "QUALITY REVIEW:" in prompt:
+                        response.update(decision=review_decision, reason_type={"readable": "none",
+                            "bad": "structural_damage", "uncertain": "image_quality"}[review_decision],
+                            evidence="Reinspected structure and image quality.")
+                    return json.dumps(response)
+            backend = ReviewVLM()
+            prediction, traces = agents.VisualAgents(backend, refs, self.refs).predict(self.root / "scale0.png")
+            self.assertEqual(prediction, expected)
+            self.assertEqual([r["role"] for r in traces[:2]], ["quality", "quality_review"])
+            self.assertEqual(backend.systems[:2], [agents.QUALITY_SYSTEM, agents.QUALITY_SYSTEM])
+            self.assertTrue(all("expert_gt" not in prompt for prompt, _ in backend.calls))
+            self.assertEqual(len(traces), 7 if review_decision == "readable" else 2)
+            if review_decision == "readable":
+                self.assertTrue(all(s == agents.AGE_SYSTEM for s in backend.systems[2:]))
+
+    def test_quality_scope_excludes_age_reflection_and_invalid_rejection(self):
+        refs = agents.load_references(self.refs)
+        backend = FakeVLM()
+        memory = [{"role": "reflection", "candidate_rule": "Age-only hypothesis marker"}]
+        agents.VisualAgents(backend, refs, self.refs, memory).predict(self.root / "scale0.png")
+        self.assertNotIn("Age-only hypothesis marker", backend.calls[0][0])
+        self.assertIn("Age-only hypothesis marker", backend.calls[1][0])
+        with self.assertRaises(ValueError):
+            agents.validate_response("quality", {"decision": "bad", "reason_type": "age_only",
+                "confidence": .5, "evidence": "missing annual annulus"})
+
+    def test_quality_metrics_use_effective_review(self):
+        out = self.root / "review_metrics"
+        out.mkdir()
+        agents.append_jsonl(out / "predictions.jsonl", {"scale_id": "x", "fish_key": "x", "split": "train",
+            "gt": 1, "prediction": 1, "error": None, "seconds": 1,
+            "traces": [{"role": "quality", "response": {"decision": "uncertain"}},
+                       {"role": "quality_review", "response": {"decision": "readable"}}]})
+        self.assertEqual(agents.evaluate(out)["quality_gate_accuracy"], 1)
 
     def test_feedback_provenance_resume_and_test_blindness(self):
         backend = FakeVLM()

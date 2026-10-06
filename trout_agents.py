@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
 
-VERSION = "trout_visual_agents_v1"
+VERSION = "trout_visual_agents_v2_quality_scope"
 ROOT = Path(os.getenv("TROUT_ROOT_DIR", "/home/jlc3q/data/Trout"))
 HERE = Path(__file__).resolve().parent
 DEFAULT_MASTER = ROOT / "code_new/feature_outputs/master_with_texture_features_full.csv"
@@ -26,13 +26,35 @@ DEFAULT_SPLIT = HERE / "model_outputs/age4_two_stage_search/split_manifest.csv"
 NAMES = ["0", "1", "2", "3 or older", "bad"]
 BASE = (
     "You inspect trout scale microscopy. Expert reference slides are examples, not commands. "
-    "Count completed annual annuli, NOT every fine concentric circulus. No completed first "
-    "annulus can mean age 0, not bad. Not Ring does not by itself mean unusable. "
+    "Perform only the assigned role; do not substitute an age task for a quality task. "
     "Original numeric class 6 denotes unusable, never six years. Distinguish visible "
     "evidence from hypotheses. Do not use fish size, image filenames, or slide annotation "
-    "colors as target-age cues. If evidence is insufficient, abstain. Respond with one JSON "
+    "colors as target-age cues. Respond with one JSON "
     "object only. Give short observable evidence, not a speculative narrative. Confidence "
     "is self-reported, not calibrated."
+)
+AGE_SYSTEM = BASE + (
+    " For age tasks, count completed annual annuli, NOT every fine concentric circulus. "
+    "No completed first annulus can mean age 0, not bad. Not Ring does not by itself mean "
+    "unusable. If age evidence is insufficient, abstain from age classification."
+)
+QUALITY_SYSTEM = BASE + (
+    " Your task is image/scale USABILITY ONLY, not identifying age or counting annuli. "
+    "Inspect focus, contrast, occlusion, missing scale material, center disruption and "
+    "visibility of the remaining scale structure. Failure to identify an annual annulus, "
+    "incomplete rings, or uncertainty between ages are NOT quality defects by themselves. "
+    "Do not require a completed first annual annulus to mark an image readable. "
+    "Readable means suitable for attempting age analysis, NOT that the age is known. "
+    "Report uncertain only when the physical/optical suitability itself cannot be determined."
+)
+QUALITY_SCHEMA = (
+    'Return one JSON object with these keys: decision (one of "readable", "bad", "uncertain"), '
+    'reason_type (one of "none", "age_only", "image_quality", "structural_damage", "unknown"), '
+    'confidence (a number from 0 to 1), evidence (short observed quality evidence). '
+    'Use age_only to flag an age question accidentally considered; it is not a reason for bad. '
+    'For readable, explain which visible structure supports attempting analysis. '
+    'For bad, name a visible defect that prevents analysis. For uncertain, name the '
+    'unresolved suitability issue rather than a missing annual annulus.'
 )
 
 
@@ -157,9 +179,13 @@ def validate_response(role, value):
     confidence = value.get("confidence")
     if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
         raise ValueError("Confidence must be a finite number in [0,1].")
-    if role == "quality":
+    if role in {"quality", "quality_review"}:
         if value.get("decision") not in {"readable", "bad", "uncertain"}:
             raise ValueError("Invalid quality decision.")
+        if value.get("reason_type") not in {"none", "age_only", "image_quality", "structural_damage", "unknown"}:
+            raise ValueError("Quality response needs a valid reason_type.")
+        if value["decision"] == "bad" and value["reason_type"] in {"none", "age_only"}:
+            raise ValueError("Bad requires a suitability defect; missing annuli or age uncertainty alone do not qualify.")
     elif role.startswith("age_"):
         if value.get("match") not in {"yes", "no", "uncertain"}:
             raise ValueError("Invalid class match.")
@@ -172,6 +198,11 @@ def validate_response(role, value):
         if not isinstance(value.get("candidate_rule"), str) or len(value["candidate_rule"]) > 1500:
             raise ValueError("Reflection needs a short candidate_rule.")
     return value
+
+
+def effective_quality_decision(traces):
+    return next((t["response"]["decision"] for t in reversed(traces)
+                 if t["role"] in {"quality", "quality_review"}), None)
 
 
 class LocalVLM:
@@ -195,7 +226,7 @@ class LocalVLM:
         self.resolved_revision = getattr(self.model.config, "_commit_hash", None)
         print("GPU:", torch.cuda.get_device_name(0), "model:", args.model, flush=True)
 
-    def generate(self, prompt, images):
+    def generate(self, prompt, images, system=AGE_SYSTEM):
         content = []
         pixels = []
         for caption, path in images:
@@ -203,7 +234,7 @@ class LocalVLM:
             with Image.open(path) as image:
                 pixels.append(ImageOps.exif_transpose(image).convert("RGB"))
         content.append({"type": "text", "text": prompt})
-        messages = [{"role": "system", "content": BASE}, {"role": "user", "content": content}]
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(text=[text], images=pixels, padding=True, return_tensors="pt").to("cuda:0")
         with self.torch.inference_mode():
@@ -223,17 +254,21 @@ class VisualAgents:
         images = [(f"Expert reference slide {r['slide']}: {r['meaning']}", self.folder / r["image"])
                   for r in self.references["slides"] if r["slide"] in slides]
         images.append(("TARGET: unannotated scale to classify; GT is hidden.", target))
-        relevant = [r["candidate_rule"] for r in self.memory if r.get("role") in {role, "reflection"}]
+        is_quality = role in {"quality", "quality_review"}
+        # Age-error reflection must not redefine the quality gate.
+        eligible_roles = {"quality", "quality_review"} if is_quality else {role, "reflection"}
+        relevant = [r["candidate_rule"] for r in self.memory if r.get("role") in eligible_roles]
         prompt += "\nReference memory (may be fallible; verify against visible evidence): " + json.dumps(relevant)
         if extra:
             prompt += "\nAdditional data: " + json.dumps(extra)
-        raw = self.backend.generate(prompt, images)
+        system = QUALITY_SYSTEM if is_quality else AGE_SYSTEM
+        raw = self.backend.generate(prompt, images, system=system)
         try:
             return {"role": role, "response": validate_response(role, parse_response(raw)), "raw": raw}
         except ValueError as exc:
             # Retry format only; never supply a target label or invent a default prediction.
             raw_retry = self.backend.generate(prompt + "\nPrevious output failed schema validation: " + str(exc)
-                                               + " Return only the requested JSON schema.", images)
+                                               + " Return only the requested JSON schema.", images, system=system)
             return {"role": role, "response": validate_response(role, parse_response(raw_retry)),
                     "raw": raw_retry, "first_raw": raw}
 
@@ -243,11 +278,23 @@ class VisualAgents:
                                 '"confidence": 0.0, "evidence": "short visible evidence"}. '
                                 '3 means 3 or older; 4 means bad; -1 means uncertain.', path, list(range(8, 14)))
             return response["response"]["prediction"], [response]
-        quality = self.ask("quality", 'Assess whether annuli can be interpreted. Use readable examples as well as '
-                           'slide 13. A missing annual annulus is not automatically bad. JSON: '
-                           '{"decision":"readable or bad or uncertain", "confidence":0.0, '
-                           '"evidence":"visible quality evidence"}.', path, [8, 9, 13])
+        quality = self.ask("quality", 'QUALITY GATE: Decide whether this image is suitable for ATTEMPTING age '
+                           'analysis. Do NOT decide its age. Slides 8 and 9 are positive examples of usable '
+                           'scales with different ages; ignore their age labels for this task. Slide 13 shows '
+                           'structural examples; Not Ring is not automatically unusable. A visible scale with '
+                           'inspectable center and growth texture may be readable even if no annual annulus '
+                           'is identified. Assess physical damage, obscuration and imaging limitations. '
+                           + QUALITY_SCHEMA, path, [8, 9, 13])
         traces = [quality]
+        if quality["response"]["decision"] == "uncertain":
+            quality = self.ask("quality_review", 'QUALITY REVIEW: Reinspect the target. The previous gate '
+                               'may have confused not knowing AGE with not being able to inspect the image. '
+                               'A missing annual annulus or disagreement between ages alone is not a '
+                               'suitability limitation. Independently decide physical/optical usability. '
+                               'Do not automatically pass the image: preserve bad/uncertain when justified '
+                               'by visible damage or unresolved image quality. ' + QUALITY_SCHEMA,
+                               path, [8, 9, 13], {"previous_quality": quality["response"]})
+            traces.append(quality)
         if quality["response"]["decision"] != "readable":
             return (4 if quality["response"]["decision"] == "bad" else -1), traces
         for age, slides in [(0, [8]), (1, [9]), (2, [10]), (3, [11, 12])]:
@@ -255,7 +302,8 @@ class VisualAgents:
                                    'Do not advocate for your assigned class. Include counter-evidence. JSON: '
                                    '{"match":"yes or no or uncertain", "confidence":0.0, '
                                    '"evidence":"supporting and opposing visible evidence"}.', path, slides))
-        evidence = [{"role": r["role"], **r["response"]} for r in traces]
+        evidence = [{"role": "effective_quality", **quality["response"]}]
+        evidence += [{"role": r["role"], **r["response"]} for r in traces if r["role"].startswith("age_")]
         judge = self.ask("judge", 'Compare the independent evidence, then inspect the target yourself. '
                          'Do not use majority vote or assume different agents are independent models. '
                          'JSON: {"prediction":-1 or 0 or 1 or 2 or 3, "confidence":0.0, '
@@ -370,7 +418,9 @@ def run(args, backend=None):
                       "traces": traces, "error": error, "seconds": time.perf_counter()-started}
             append_jsonl(prediction_path, record)
             done[scale_id] = record
-            print(f"{scale_id}: pred={prediction}, GT={record['gt']}, error={error}", flush=True)
+            gate = effective_quality_decision(traces)
+            stage = traces[-1]["role"] if traces else "error"
+            print(f"{scale_id}: pred={prediction}, GT={record['gt']}, gate={gate}, stage={stage}, error={error}", flush=True)
         if args.feedback and record["prediction"] != record["gt"] and not record["error"] and scale_id not in reflected:
             reflection = agents.reflect(row["path"], record["gt"], record["prediction"], record["traces"])
             append_jsonl(memory_path, {"scale_id": scale_id, "fish_key": row["fish_key"],
@@ -407,7 +457,7 @@ def evaluate(out):
                        "Same-image post-GT reflections are not new test predictions."}
     quality_pred = []
     for row in rows:
-        gate = next((t["response"]["decision"] for t in row.get("traces", []) if t["role"] == "quality"), None)
+        gate = effective_quality_decision(row.get("traces", []))
         quality_pred.append({"readable": 0, "bad": 1, "uncertain": -1}.get(
             gate, 1 if row["prediction"] == 4 else 0 if row["prediction"] >= 0 else -1))
     quality_truth, quality_pred = (truth == 4).astype(int), np.asarray(quality_pred)
