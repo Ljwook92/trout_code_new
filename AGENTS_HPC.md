@@ -200,3 +200,32 @@ shifts PDF page numbers. The preparation script validates the page count.
 - [Official PyTorch installation combinations](https://pytorch.org/get-started/previous-versions/)
 - [Reflexion](https://arxiv.org/abs/2303.11366): related memory-based feedback idea;
   not evidence of improved trout-scale prediction.
+# Fish-Level Age Propagation
+
+Prepare supervised training labels without changing the existing fish split:
+
+```bash
+python prepare_trout_training_labels.py \
+  --master /home/jlc3q/data/Trout/code_new/feature_outputs/master_with_texture_features_full.csv \
+  --manifest model_outputs/age4_two_stage_search/split_manifest.csv \
+  --out agent_outputs/supervised_labels_v1.csv
+```
+
+Use the actual saved manifest path if your run used a different output directory.
+Optional `--quality-csv expert_quality.csv` accepts `scale_id,quality_gt`, where
+quality_gt is an expert's image-specific `readable` or `bad` annotation, never a
+model prediction. Original labels 0..5 imply directly labeled readable scales;
+6 denotes bad. Missing labels imply unknown quality unless separately annotated.
+
+Only separately confirmed readable scales can receive an age from the same fish
+when all its direct expert ages agree. Quality is never propagated. Conflicting
+fish are flagged and excluded from age training pending expert review. Unassigned
+fish are retained for audit but excluded from supervised training. Validation/test
+age evaluation uses direct expert labels only, not propagated labels. Every output
+row records label provenance; length and weight are excluded. Existing outputs
+are never overwritten.
+
+This command prepares a new training table; it does NOT fine-tune Qwen, update
+SimCLR, or change the existing agent inference cohort. Propagated scales increase
+image count, not the number of independently labeled fish. Until unknown-quality
+scales receive expert quality annotations, they do not expand age training.
