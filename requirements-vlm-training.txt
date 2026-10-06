@@ -1,0 +1,2 @@
+-r requirements-agent.txt
+peft==0.17.1

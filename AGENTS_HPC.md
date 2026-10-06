@@ -202,6 +202,47 @@ shifts PDF page numbers. The preparation script validates the page count.
   not evidence of improved trout-scale prediction.
 # Fish-Level Age Propagation
 
+## Actual VLM Weight Training
+
+`train_trout_vlm.py` performs response-only supervised LoRA fine-tuning of the
+pinned Qwen2.5-VL-3B model. Train quality and age separately. Expert age GT does
+not supply reasoning GT: targets contain only decision/prediction JSON, not
+fabricated annulus explanations. PPT slides remain inference references, not
+extra labeled training images. Language attention is adapted; the vision encoder
+is frozen. This is supervised learning, not RL or whole-model fine-tuning.
+
+```bash
+export HF_HOME="/local/scratch/$USER/trout_hf"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_HUB_DISABLE_XET=1
+mkdir -p "$HF_HUB_CACHE"
+python -m pip install --no-cache-dir -r requirements-vlm-training.txt
+
+python train_trout_vlm.py --labels agent_outputs/supervised_labels_v1.csv \
+  --task quality --out agent_outputs/quality_lora_v1 --dry-run
+python train_trout_vlm.py --labels agent_outputs/supervised_labels_v1.csv \
+  --task age --out agent_outputs/age_lora_v1 --dry-run
+
+python train_trout_vlm.py --labels agent_outputs/supervised_labels_v1.csv \
+  --task quality --out agent_outputs/quality_lora_v1
+python train_trout_vlm.py --labels agent_outputs/supervised_labels_v1.csv \
+  --task age --out agent_outputs/age_lora_v1
+```
+
+Use an allocated GPU node (V100: fp16). Scratch cache is node-local and is not a
+persistent backup. Outputs remain in the repository's data filesystem. Never
+overwrite a prior run: use v2 etc. Default micro-batch 1, accumulation 8, rank 8,
+3 epochs and 1e-4 LR are a starting configuration, not searched optima. Pixel
+budget is 200704; downsampling may lose fine annulus information. Check GPU
+memory; reduce `--max-pixels` in a NEW run on OOM. GPU training has not been
+verified on the developer Mac. Run the dry-run first, then a real training run.
+
+Checkpoint selection uses validation answer-token loss, NOT validation macro-F1.
+No test images enter training or selection. A held-out generation evaluation is
+still needed to establish classification accuracy. `best_adapter/` contains LoRA
+weights, not the complete base model. Existing `trout_agents.py` does not yet
+load these adapters: its old inference results will not change automatically.
+
 Prepare supervised training labels without changing the existing fish split:
 
 ```bash
