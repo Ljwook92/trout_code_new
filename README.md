@@ -2,6 +2,14 @@
 
 Initial EDA and table-building code for the corrected trout dataset.
 
+## Terminal-Based Visual Agents
+
+`trout_agents.py` runs a local GPU VLM with expert slides 8..13, a readable/bad
+gate, four independent age roles and a final adjudicator. It optionally collects
+train-only GT reflection memory; this is not weight fine-tuning or RL. Existing
+notebooks are unchanged. See [AGENTS_HPC.md](AGENTS_HPC.md) for environment setup,
+pilot commands, memory review, fixed fish splits and held-out evaluation.
+
 Expected HPC layout:
 
 ```text

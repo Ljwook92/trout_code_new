@@ -1,0 +1,56 @@
+{
+  "source": "Trout.pptx",
+  "source_sha256": "cdf2c4bc45fb9c6c4850ad848aba5874ddda3febabdc7f78df2d472ec59c5a63",
+  "slides": [
+    {
+      "slide": 8,
+      "image": "slide_08.png",
+      "text": "Trout Scales\nNo completed first ring\nAge class: \n0+\nIndividuals that have not completed the first year\n1.722 \nmicras\n/ pixel",
+      "age": 0,
+      "meaning": "No completed first annulus; 0+.",
+      "sha256": "87a51a1b8fa326390737f96a2f94f2bb071998594638d501cd869441da3fe3a7"
+    },
+    {
+      "slide": 9,
+      "image": "slide_09.png",
+      "text": "Trout Scales\nRing 1\nAge class: \n1+\nIndividuals that have more than 1 year but have not completed the 2 year",
+      "age": 1,
+      "meaning": "One completed annulus; 1+.",
+      "sha256": "9b4d895182f87726000bc19e33b6d1f45bd43e1d4fc284e087616ce59bc50b14"
+    },
+    {
+      "slide": 10,
+      "image": "slide_10.png",
+      "text": "Trout Scales\nRing 1\nRing 2\nAge class: \n2+",
+      "age": 2,
+      "meaning": "Two completed annuli; 2+.",
+      "sha256": "4a137ab1fd7c7fa5123089f096ad41443f71b7aa31f785bcb51e8352c93a3e34"
+    },
+    {
+      "slide": 11,
+      "image": "slide_11.png",
+      "text": "Trout Scales\nRing 1\nRing 2\nRing 3\nAge class: \n3+",
+      "age": 3,
+      "meaning": "Three completed annuli; 3+.",
+      "sha256": "85d55b2f1220a85f752a13301e6ccc3777518ee6ae6bb2345d7f26df20f72f87"
+    },
+    {
+      "slide": 12,
+      "image": "slide_12.png",
+      "text": "Trout Scales\nRing 1\nRing 2\nRing 3\nRing 4\nAge class: \n4+\nMore classes are also possible (5+, 6+, \netc\n), but less frequent",
+      "age": 3,
+      "meaning": "Four completed annuli; 4+, grouped into 3 or older.",
+      "sha256": "1d22978b9fddf21235a770d7a2ec25221cfaf88ea0a2742a863bc8cf4cce0af5"
+    },
+    {
+      "slide": 13,
+      "image": "slide_13.png",
+      "text": "Trout Scales\nNot Ring\nBroken",
+      "age": null,
+      "meaning": "Not Ring and Broken examples. Not Ring alone is NOT a bad label.",
+      "sha256": "c0b5638f5c368894cb445dd92fccbb51e8413646efc6dcb457731e1ff275b0c1"
+    }
+  ],
+  "reference_fish_overlap": "unknown; audit before confirmatory evaluation",
+  "note": "Rendered examples are expert references, not model fine-tuning."
+}
