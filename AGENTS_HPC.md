@@ -202,6 +202,40 @@ shifts PDF page numbers. The preparation script validates the page count.
   not evidence of improved trout-scale prediction.
 # Fish-Level Age Propagation
 
+## Frozen Adapter Evaluation
+
+```bash
+python evaluate_trout_vlm.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-adapter agent_outputs/quality_lora_v1/best_adapter \
+  --age-adapter agent_outputs/age_lora_v1/best_adapter \
+  --split validation --compare-base --limit 20 \
+  --out agent_outputs/lora_validation_pilot_v1 --dry-run
+```
+
+Remove `--dry-run` to predict the same 20 images with base Qwen and LoRA.
+For full validation remove `--limit 20` and use a NEW output directory.
+Only after freezing all settings use `--split test` in another new directory.
+Do not retune on test results. Keep scratch HF cache exports active in this shell.
+
+One GPU base model loads both adapters, activating quality for usability and age
+for age classification. Base comparison disables both adapters, using identical
+training prompts and image budgets. There are no PPT reference images, multiple
+age advocates, GT feedback or generated reasoning in this classification evaluation.
+This isolates weight fine-tuning from the older prompt-based multi-agent workflow.
+
+`comparison.csv` separates quality, oracle-GT-readable age, and predicted-gate
+end-to-end outcomes. Age inference also runs for GT-readable rejected images only
+to compute the oracle diagnostic; it never overrides the pipeline's quality gate.
+Malformed JSON is counted as an abstention, not removed. Reports, confusion
+matrices including abstentions, raw outputs, adapter/data hashes and coverage/bad
+pass rates are saved. Limited samples are exploratory, not final estimates.
+Validation is reused from checkpoint selection, not an unbiased final test.
+Runs do not resume automatically: predictions.jsonl preserves partial records on
+interruption; use a new output directory for a restart. Real CUDA evaluation
+must still be verified on HPC. Do not run the old trout_agents.py expecting it
+to automatically activate these adapters.
+
 ## Actual VLM Weight Training
 
 `train_trout_vlm.py` performs response-only supervised LoRA fine-tuning of the
