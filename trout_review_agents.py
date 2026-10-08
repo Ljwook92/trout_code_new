@@ -11,7 +11,7 @@ import pandas as pd
 from evaluate_trout_vlm import evaluation_rows
 from train_trout_vlm import MODEL, REVISION, transform_image
 
-VERSION = "bounded_lora_review_v1"
+VERSION = "bounded_lora_review_v2_feedback"
 
 
 def sha(path):
@@ -26,11 +26,15 @@ class ReviewWorkflow:
     def run(self, path):
         traces = []
         actions = []
-        def inspect(task, view, pixels, rotation=0, contrast=1):
+        def inspect(task, view, pixels, rotation=0, contrast=1, feedback_context=None):
             if len(traces) >= self.policy["max_calls"]:
                 return None
             start = time.monotonic()
-            response = self.tool.inspect(path, task, pixels, rotation, contrast)
+            if feedback_context is None:
+                response = self.tool.inspect(path, task, pixels, rotation, contrast)
+            else:
+                response = self.tool.inspect(path, task, pixels, rotation, contrast,
+                                             feedback_context=feedback_context)
             if type(response.get("prediction")) is not int or response["prediction"] not in (range(2) if task == "quality" else range(4)):
                 raise ValueError("Tool returned an invalid class")
             if not math.isfinite(response.get("margin", float("nan"))) or not 0 <= response["margin"] <= 1:
@@ -38,6 +42,8 @@ class ReviewWorkflow:
             trace = {"role": "quality" if task == "quality" else "age", "task": task, "view": view,
                      "pixels": pixels, "rotation": rotation, "contrast": contrast,
                      "seconds": time.monotonic() - start, **response}
+            if feedback_context is not None:
+                trace["feedback_context"] = feedback_context
             traces.append(trace)
             return trace
 
@@ -50,6 +56,47 @@ class ReviewWorkflow:
                     "first_quality_prediction": qualities[0]["prediction"] if qualities else -1,
                     "calls": len(traces), "review_actions": actions, "traces": traces}
 
+        def reconsider(task):
+            threshold = self.policy[task + "_margin"]
+            previous = None
+            for round_index in range(self.policy.get("feedback_rounds", 0)):
+                if len(traces) >= self.policy["max_calls"]:
+                    break
+                history = [{key: t[key] for key in ["view", "prediction", "margin", "pixels",
+                            "rotation", "contrast", "ranking_weights"] if key in t}
+                           for t in traces if t["task"] == task]
+                classes = sorted({h["prediction"] for h in history})
+                question = (
+                    "Reinspect physical/optical usability, not age. Distinguish visible scale "
+                    "damage from absence of an identified annual ring."
+                    if task == "quality" else
+                    "Reinspect completed annual annuli across the full scale. Distinguish annual "
+                    "annuli from fine circuli; do not infer annulus counts from previous age labels."
+                )
+                context = {"round": round_index + 1, "observed_classes": classes,
+                           "previous_checks": history, "review_question": question,
+                           "instruction": "All previous predictions and scores are fallible, not expert GT. "
+                           "Return to the image and decide again using both unmodified and contrast views. "
+                           "Do not copy the most frequent or latest answer merely to reach agreement. "
+                           "No new visual evidence has been annotated by an expert."}
+                actions.append({"role": "review", "action": "return_to_task_with_feedback",
+                                "task": task, "round": round_index + 1, "review_question": question,
+                                "observed_classes": classes})
+                # Reinspection is an actual context-conditioned model call, not a vote over logs.
+                current = inspect(task, f"feedback_round_{round_index + 1}", self.policy["review_pixels"],
+                                  contrast=1.15 if round_index % 2 == 0 else 0.9,
+                                  feedback_context=context)
+                if (previous is not None and current["prediction"] == previous["prediction"]
+                        and min(current["margin"], previous["margin"]) >= threshold):
+                    actions.append({"role": "review", "action": "accept_feedback_stabilization",
+                                    "task": task, "prediction": current["prediction"],
+                                    "note": "Two context-conditioned checks agree; visual basis is not expert-verified."})
+                    return current
+                previous = current
+            actions.append({"role": "review", "action": "refer_to_expert", "task": task,
+                            "reason": "feedback_did_not_stabilize_within_budget"})
+            return None
+
         q = inspect("quality", "original", self.policy["quality_pixels"])
         qlimit = self.policy["quality_margin"]
         if q["margin"] < qlimit:
@@ -59,8 +106,12 @@ class ReviewWorkflow:
             if reviewed is None:
                 return finish(-1, "quality_review_budget_exhausted")
             if reviewed["prediction"] != q["prediction"] or reviewed["margin"] < qlimit:
-                return finish(-1, "quality_unresolved_or_disagreement")
-            q = reviewed
+                resolved = reconsider("quality")
+                if resolved is None:
+                    return finish(-1, "quality_unresolved_or_disagreement")
+                q = resolved
+            else:
+                q = reviewed
         if q["prediction"] == 1:
             return finish(4, "bad_with_sufficient_ranking_margin")
 
@@ -85,6 +136,9 @@ class ReviewWorkflow:
                                 "reason": "age_still_unresolved"})
                 inspect("age", "contrast_check", self.policy["review_pixels"], contrast=1.15)
         if not consistent():
+            resolved = reconsider("age")
+            if resolved is not None:
+                return finish(resolved["prediction"], "feedback_stabilized_not_expert_verified")
             actions.append({"role": "review", "action": "refer_to_expert",
                             "reason": "no_evidence_to_override_disagreement"})
             return finish(-1, "age_unresolved_or_disagreement")
@@ -106,7 +160,7 @@ class LoRATools:
         self.model.load_adapter(str(age_adapter), adapter_name="age", is_trainable=False)
         self.model.config.use_cache = False
 
-    def inspect(self, path, task, pixels, rotation=0, contrast=1):
+    def inspect(self, path, task, pixels, rotation=0, contrast=1, feedback_context=None):
         from PIL import Image, ImageOps
         torch = self.torch
         if pixels not in self.processors:
@@ -117,11 +171,10 @@ class LoRATools:
         self.model.eval()
         with Image.open(path) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")
-        image = transform_image(image, angle=rotation, contrast=contrast)
-        messages = [{"role": "system", "content": config["system"]}, {"role": "user", "content": [
-            {"type": "image"}, {"type": "text", "text": config["prompt"]}]}]
+        images, content = inspection_content(image, config["prompt"], rotation, contrast, feedback_context)
+        messages = [{"role": "system", "content": config["system"]}, {"role": "user", "content": content}]
         prefix = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prefix_ids = processor(text=[prefix], images=[image], return_tensors="pt")["input_ids"]
+        prefix_ids = processor(text=[prefix], images=images, return_tensors="pt")["input_ids"]
         n = prefix_ids.shape[1]
         candidates = ([{"decision": "readable"}, {"decision": "bad"}] if task == "quality" else
                       [{"prediction": i} for i in range(4)])
@@ -130,7 +183,7 @@ class LoRATools:
         for candidate in candidates:
             completed = processor.apply_chat_template(messages + [{"role": "assistant", "content": json.dumps(candidate)}],
                                                        tokenize=False, add_generation_prompt=False)
-            inputs = processor(text=[completed], images=[image], return_tensors="pt")
+            inputs = processor(text=[completed], images=images, return_tensors="pt")
             if not torch.equal(inputs["input_ids"][:, :n], prefix_ids):
                 raise ValueError("Response token prefix mismatch")
             inputs = inputs.to("cuda:0")
@@ -150,6 +203,19 @@ class LoRATools:
                 "calibrated_probability": False}
 
 
+def inspection_content(image, prompt, rotation=0, contrast=1, feedback_context=None):
+    transformed = transform_image(image, angle=rotation, contrast=contrast)
+    if feedback_context is None:
+        return [transformed], [{"type": "image"}, {"type": "text", "text": prompt}]
+    # Keep the original visible alongside enhancement; do not let contrast changes replace evidence.
+    content = [{"type": "text", "text": "Original full-frame scale (no expert annotations)."},
+               {"type": "image"},
+               {"type": "text", "text": f"Same full scale, contrast factor {contrast}; not independent evidence."},
+               {"type": "image"},
+               {"type": "text", "text": "Reviewer feedback:\n" + json.dumps(feedback_context) + "\n" + prompt}]
+    return [image, transformed], content
+
+
 def write_reports(records, out):
     from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
     rows = pd.DataFrame(records)
@@ -166,6 +232,9 @@ def write_reports(records, out):
                "readable_age_coverage": float(passed[readable].mean()) if readable.any() else None,
                "bad_pass_rate": float(passed[~readable].mean()) if (~readable).any() else None,
                "mean_tool_calls": float(rows.calls.mean()), "mean_seconds": float(rows.seconds.mean()),
+               "feedback_used_count": sum(any("feedback_context" in t for t in r["traces"]) for r in records),
+               "feedback_accepted_count": sum(r["prediction"] >= 0 and any(
+                   a["action"] == "accept_feedback_stabilization" for a in r["review_actions"]) for r in records),
                "note": "Margins are uncalibrated. Accepted accuracy must be interpreted with referral/coverage."}
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     names = ["0", "1", "2", "3 or older", "bad"]
@@ -189,7 +258,8 @@ def main():
     parser.add_argument("--quality-margin", type=float, default=0.05)
     parser.add_argument("--age-margin", type=float, default=0.05)
     parser.add_argument("--review-pixels", type=int, default=1605632)
-    parser.add_argument("--max-calls", type=int, default=6)
+    parser.add_argument("--max-calls", type=int, default=10)
+    parser.add_argument("--feedback-rounds", type=int, default=2, help="0 disables; 2..4 bounded reinspection rounds per task")
     parser.add_argument("--limit", type=int, default=20, help="0: all; default exploratory pilot")
     parser.add_argument("--frozen-policy", type=Path, help="Validation policy_settings.json required for test")
     parser.add_argument("--out", required=True, type=Path)
@@ -197,6 +267,8 @@ def main():
     args = parser.parse_args()
     if args.limit < 0 or args.max_calls < 3 or args.review_pixels < 56 * 56:
         raise ValueError("Invalid limit/budget/pixel settings")
+    if args.feedback_rounds not in [0, 2, 3, 4]:
+        raise ValueError("Feedback rounds must be 0 or 2..4")
     if not all(math.isfinite(x) and 0 <= x <= 1 for x in [args.quality_margin, args.age_margin]):
         raise ValueError("Ranking margins must be finite 0..1")
     label_hash = sha(args.labels)
@@ -209,7 +281,7 @@ def main():
         adapter_hashes[task] = sha(folder / "adapter_model.safetensors")
     policy = {"protocol": VERSION, "quality_margin": args.quality_margin, "age_margin": args.age_margin,
               "quality_pixels": configs["quality"]["max_pixels"], "age_pixels": configs["age"]["max_pixels"],
-              "review_pixels": args.review_pixels, "max_calls": args.max_calls,
+              "review_pixels": args.review_pixels, "max_calls": args.max_calls, "feedback_rounds": args.feedback_rounds,
               "labels_sha256": label_hash, "adapter_hashes": adapter_hashes,
               "scoring": "mean_response_token_log_likelihood_softmax_not_calibrated"}
     if args.review_pixels <= max(policy["quality_pixels"], policy["age_pixels"]):
@@ -223,7 +295,8 @@ def main():
         rows = rows.sample(frac=1, random_state=100).head(args.limit)
     if not rows.path.map(lambda p: Path(str(p)).is_file()).all():
         raise FileNotFoundError("Missing input images")
-    print(f"split={args.split} images={len(rows)}; bounded workflow; uncalibrated margins", flush=True)
+    print(f"split={args.split} images={len(rows)}; feedback_rounds={args.feedback_rounds}; "
+          "bounded workflow; uncalibrated margins", flush=True)
     if args.dry_run:
         print("Dry run passed; no model loaded")
         return
@@ -246,7 +319,8 @@ def main():
         records.append(record)
         with (args.out / "predictions.jsonl").open("a") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
-        print(f"{row['scale_id']}: pred={result['prediction']} status={result['status']} calls={result['calls']}", flush=True)
+        print(f"{row['scale_id']}: pred={result['prediction']} status={result['status']} "
+              f"calls={result['calls']} reason={result['reason']}", flush=True)
     write_reports(records, args.out)
 
 

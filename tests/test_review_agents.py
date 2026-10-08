@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pandas as pd
 from PIL import Image
 
-from trout_review_agents import ReviewWorkflow, write_reports, main, sha
+from trout_review_agents import ReviewWorkflow, write_reports, main, sha, inspection_content
 from train_trout_vlm import MODEL, REVISION
 
 
@@ -19,14 +19,63 @@ class FakeTool:
     def __init__(self, responses):
         self.responses = iter(responses)
         self.calls = []
+        self.contexts = []
 
-    def inspect(self, path, task, pixels, rotation, contrast):
+    def inspect(self, path, task, pixels, rotation, contrast, feedback_context=None):
         self.calls.append((path, task, pixels, rotation, contrast))
+        self.contexts.append(feedback_context)
         pred, margin = next(self.responses)
         return {"prediction": pred, "margin": margin, "ranking_weights": [], "calibrated_probability": False}
 
 
 class ReviewTests(unittest.TestCase):
+    def test_feedback_uses_history_and_can_change_initial_age(self):
+        responses = [(0, .5), (2, .3), (3, .3), (3, .3), (2, .3), (3, .2), (3, .25)]
+        result, tool = self.run_workflow(responses, {**POLICY, "max_calls": 10, "feedback_rounds": 2})
+        self.assertEqual(result["prediction"], 3)
+        self.assertEqual(result["first_age_prediction"], 2)
+        self.assertEqual(result["reason"], "feedback_stabilized_not_expert_verified")
+        self.assertEqual(len(tool.contexts[-2]["previous_checks"]), 4)
+        self.assertEqual(len(tool.contexts[-1]["previous_checks"]), 5)
+        self.assertNotIn("gt", json.dumps(tool.contexts[-1]))
+        self.assertEqual(tool.contexts[-1]["round"], 2)
+
+    def test_feedback_oscillation_stops_and_refers(self):
+        result, _ = self.run_workflow([(0, .5), (2, .3), (3, .3), (3, .3), (2, .3), (3, .3), (2, .3)],
+                                     {**POLICY, "max_calls": 10, "feedback_rounds": 2})
+        self.assertEqual(result["prediction"], -1)
+        self.assertEqual(result["calls"], 7)
+
+    def test_feedback_must_not_accept_one_changed_answer(self):
+        result, _ = self.run_workflow([(0, .5), (2, .3), (3, .3), (3, .3), (2, .3), (3, .3)],
+                                     {**POLICY, "max_calls": 6, "feedback_rounds": 2})
+        self.assertEqual(result["prediction"], -1)
+        self.assertEqual(result["calls"], 6)
+
+    def test_quality_feedback_restarts_gate_before_age(self):
+        result, tool = self.run_workflow([(1, .01), (0, .03), (0, .2), (0, .3), (2, .2), (2, .3)],
+                                        {**POLICY, "max_calls": 10, "feedback_rounds": 2})
+        self.assertEqual(result["prediction"], 2)
+        self.assertTrue(all(call[1] == "quality" for call in tool.calls[:4]))
+        self.assertIsNotNone(tool.contexts[2])
+
+    def test_feedback_two_agreeing_low_scores_still_refer(self):
+        result, _ = self.run_workflow([(0, .5), (2, .3), (3, .3), (3, .3), (2, .3), (3, .01), (3, .02)],
+                                     {**POLICY, "max_calls": 10, "feedback_rounds": 2})
+        self.assertEqual(result["prediction"], -1)
+
+    def test_feedback_content_contains_both_images_and_request(self):
+        image = Image.new("RGB", (40, 20), (100, 100, 100))
+        context = {"review_question": "Reinspect age 2 vs 3", "previous_checks": [{"prediction": 2}]}
+        images, content = inspection_content(image, "Return class JSON", contrast=1.15, feedback_context=context)
+        self.assertEqual(len(images), 2)
+        self.assertIs(images[0], image)
+        self.assertEqual(len([item for item in content if item["type"] == "image"]), 2)
+        self.assertIn("Reinspect age 2 vs 3", content[-1]["text"])
+        self.assertIn("Return class JSON", content[-1]["text"])
+        original_images, _ = inspection_content(image, "Return class JSON")
+        self.assertEqual(len(original_images), 1)
+
     def test_cli_dry_run_and_test_requires_frozen_policy(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

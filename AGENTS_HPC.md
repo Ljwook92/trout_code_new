@@ -202,6 +202,50 @@ shifts PDF page numbers. The preparation script validates the page count.
   not evidence of improved trout-scale prediction.
 # Fish-Level Age Propagation
 
+## Context-Conditioned Feedback Reinspection (v2)
+
+Unresolved quality or age checks now return to the corresponding task with the
+previous class rankings, margins, image settings and a reviewer question. The
+next Qwen call receives this history PLUS the original full image and a
+contrast-adjusted full image together. History is explicitly labeled fallible,
+not expert GT. Reviewer questions are constructed from observed disagreements,
+not invented annulus locations or generated explanations.
+
+```bash
+python trout_review_agents.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-adapter agent_outputs/quality_lora_v1/best_adapter \
+  --age-adapter agent_outputs/age_lora_h100_highres_v1/best_adapter \
+  --split validation --limit 20 --feedback-rounds 2 --max-calls 10 \
+  --out agent_outputs/review_validation_feedback_v2 --dry-run
+```
+
+Remove `--dry-run` after validation passes. Do not reuse the v1 output directory.
+No retraining or new dependencies are required. v2 defaults to two feedback
+rounds per unresolved task, capped at ten total inspection calls. Each round
+includes unmodified and enhanced full frames at the review pixel budget, with
+contrast 1.15 then 0.9. That is up to twice the image-token budget of a single
+inspection: runtime and GPU memory need verification on HPC.
+
+Two consecutive feedback rounds must agree AND both exceed the task margin.
+A single changed answer, oscillating answers or insufficient scores still refer
+to experts. Earlier disagreements are not silently removed: they remain in the
+traces even if feedback stabilizes. This is a conservative stopping heuristic,
+not calibrated confidence, expert-verified visual reasoning or proof of accuracy.
+Reinspection may introduce anchoring/self-confirmation; evaluate accepted errors
+and referral rate on the same validation cohort. The class-only LoRA was not
+trained specifically for multi-image reviewer-history prompts, so gains are not
+assumed. `--feedback-rounds 0` disables the loop for a paired no-feedback run.
+Freeze this new protocol separately before test; v1 frozen policy files do not
+match v2. Test GT never enters the loop; feedback does not update model weights.
+
+The loop currently re-enters the unresolved task, not the entire quality-age
+sequence: quality must resolve before age, and an age correction does not
+automatically change a completed quality decision. Review is still controlled
+by explicit bounded rules, not a free-form autonomous planner. Audit
+`feedback_context` in predictions.jsonl to inspect what the next call actually
+received. Metrics include feedback-used and feedback-accepted counts.
+
 ## Bounded Quality, Age and Review Roles
 
 `trout_review_agents.py` reuses the frozen quality and age adapters. This is an
