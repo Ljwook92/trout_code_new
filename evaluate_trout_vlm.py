@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 
-from train_trout_vlm import MODEL, REVISION
+from train_trout_vlm import MODEL, REVISION, transform_image
 from trout_agents import parse_response
 
 
@@ -87,9 +87,15 @@ def main():
     parser.add_argument("--compare-base", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--rotation", type=float, default=0, help="Fixed evaluation perturbation in degrees")
+    parser.add_argument("--brightness", type=float, default=1)
+    parser.add_argument("--contrast", type=float, default=1)
     args = parser.parse_args()
     if args.limit < 0:
         raise ValueError("Limit cannot be negative")
+    import math
+    if not all(math.isfinite(x) for x in [args.rotation, args.brightness, args.contrast]) or min(args.brightness, args.contrast) <= 0:
+        raise ValueError("Invalid evaluation perturbation")
     table = pd.read_csv(args.labels)
     rows = evaluation_rows(table, args.split)
     if args.limit:
@@ -137,6 +143,7 @@ def main():
         model.eval()
         with Image.open(path) as im:
             image = ImageOps.exif_transpose(im).convert("RGB")
+        image = transform_image(image, args.rotation, args.brightness, args.contrast)
         messages = [{"role": "system", "content": config["system"]}, {"role": "user", "content": [
             {"type": "image"}, {"type": "text", "text": config["prompt"]}]}]
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -153,7 +160,9 @@ def main():
     args.out.mkdir(parents=True)
     provenance = {"split": args.split, "limit": args.limit, "labels_sha256": label_hash,
                   "compare_base": args.compare_base, "model": MODEL, "revision": REVISION,
-                  "training_configs": configs, "test_feedback": False}
+                  "training_configs": configs, "test_feedback": False,
+                  "fixed_perturbation": {"rotation": args.rotation, "brightness": args.brightness,
+                                         "contrast": args.contrast}}
     for task, folder in [("quality", args.quality_adapter), ("age", args.age_adapter)]:
         provenance[task + "_adapter_sha256"] = hashlib.sha256((folder / "adapter_model.safetensors").read_bytes()).hexdigest()
     (args.out / "evaluation_config.json").write_text(json.dumps(provenance, indent=2))

@@ -2,14 +2,49 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
+import random
+from statistics import median
 
 import pandas as pd
+from PIL import Image, ImageEnhance, ImageOps
 
 from trout_agents import AGE_SYSTEM, QUALITY_SYSTEM
 
 MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 REVISION = "66285546d2b821cf421d4f5eb2576359d3770cd3"
+
+
+def transform_image(image, angle=0, brightness=1, contrast=1):
+    if not all(math.isfinite(x) for x in [angle, brightness, contrast]) or brightness <= 0 or contrast <= 0:
+        raise ValueError("Invalid image transform parameters")
+    if angle:
+        # Preserve the frame; match new corners to the microscopy background, not black.
+        corners = [image.getpixel(p) for p in [(0, 0), (image.width - 1, 0),
+                   (0, image.height - 1), (image.width - 1, image.height - 1)]]
+        fill = tuple(int(median(c[channel] for c in corners)) for channel in range(3))
+        image = image.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill)
+    if brightness != 1:
+        image = ImageEnhance.Brightness(image).enhance(brightness)
+    if contrast != 1:
+        image = ImageEnhance.Contrast(image).enhance(contrast)
+    return image
+
+
+def augment_image(image, split, enabled=False, rotation_degrees=15,
+                  brightness_jitter=0.15, contrast_jitter=0.15, rng=None):
+    if not enabled or split != "train":
+        return image
+    rng = rng or random
+    # Exact quarter turns cover arbitrary acquisition orientation without interpolation.
+    turn = rng.randrange(4)
+    if turn:
+        image = image.transpose({1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180,
+                                 3: Image.Transpose.ROTATE_270}[turn])
+    return transform_image(image, rng.uniform(-rotation_degrees, rotation_degrees),
+                           rng.uniform(1 - brightness_jitter, 1 + brightness_jitter),
+                           rng.uniform(1 - contrast_jitter, 1 + contrast_jitter))
 
 
 def select_rows(table, task):
@@ -56,10 +91,17 @@ def main():
     parser.add_argument("--max-pixels", type=int, default=256 * 28 * 28)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--seed", type=int, default=100)
+    parser.add_argument("--augment", action="store_true", help="Train-only rotation/brightness/contrast")
+    parser.add_argument("--rotation-degrees", type=float, default=15, help="Small rotation after random quarter turn")
+    parser.add_argument("--brightness-jitter", type=float, default=0.15)
+    parser.add_argument("--contrast-jitter", type=float, default=0.15)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.epochs < 1 or args.lr <= 0 or args.accumulation < 1 or args.rank < 1 or args.max_pixels < 56 * 56:
         raise ValueError("Invalid training parameters")
+    if (not math.isfinite(args.rotation_degrees) or not 0 <= args.rotation_degrees <= 45
+            or not all(math.isfinite(x) and 0 <= x < 1 for x in [args.brightness_jitter, args.contrast_jitter])):
+        raise ValueError("Rotation must be 0..45; brightness/contrast jitter must be 0..<1")
     train, val = select_rows(pd.read_csv(args.labels), args.task)
     for rows in [train, val]:
         missing = rows.loc[~rows.path.map(lambda p: Path(str(p)).is_file()), "path"]
@@ -67,6 +109,7 @@ def main():
             raise FileNotFoundError(f"Missing image: {missing.iloc[0]}")
     print(f"task={args.task} train={len(train)} validation={len(val)}; test is not used", flush=True)
     print(train.answer.value_counts().to_string(), flush=True)
+    print("Training augmentation:", args.augment, "; validation is never augmented", flush=True)
     if args.dry_run:
         print("Dry run passed; no model loaded or output written.")
         return
@@ -74,7 +117,6 @@ def main():
         raise FileExistsError("Use a new output directory; existing experiments are preserved")
 
     import torch
-    from PIL import Image, ImageOps
     from peft import LoraConfig, get_peft_model
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, Trainer, TrainingArguments, set_seed
 
@@ -108,6 +150,8 @@ def main():
         row = examples[0]
         with Image.open(row["path"]) as im:
             image = ImageOps.exif_transpose(im).convert("RGB")
+        image = augment_image(image, row["split"], args.augment, args.rotation_degrees,
+                              args.brightness_jitter, args.contrast_jitter)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": [
             {"type": "image"}, {"type": "text", "text": prompt}]}]
         prefix = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -130,7 +174,9 @@ def main():
     config = {**vars(args), "labels": str(args.labels), "out": str(args.out), "model": MODEL,
               "revision": REVISION, "labels_sha256": hashlib.sha256(args.labels.read_bytes()).hexdigest(),
               "system": system, "prompt": prompt, "selection_metric": "validation_answer_loss",
-              "reasoning_supervision": False, "vision_encoder_frozen": True}
+              "reasoning_supervision": False, "vision_encoder_frozen": True,
+              "augmentation_protocol": "train_only_quarter_turn_small_rotation_brightness_contrast_v1",
+              "rotation_expand": True, "crop": False}
     (args.out / "training_config.json").write_text(json.dumps(config, indent=2))
     pd.concat([train, val]).to_csv(args.out / "used_rows.csv", index=False)
     training_args = TrainingArguments(

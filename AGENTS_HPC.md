@@ -202,6 +202,46 @@ shifts PDF page numbers. The preparation script validates the page count.
   not evidence of improved trout-scale prediction.
 # Fish-Level Age Propagation
 
+## Train-Only Robustness Augmentation
+
+Keep the running high-resolution baseline unchanged. After it completes, train
+another age adapter with identical labels, split, resolution, LR, epochs and seed:
+
+```bash
+python train_trout_vlm.py --labels agent_outputs/supervised_labels_v1.csv \
+  --task age --max-pixels 802816 --augment \
+  --out agent_outputs/age_lora_h100_highres_aug_v1
+
+python evaluate_trout_vlm.py --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-adapter agent_outputs/quality_lora_v1/best_adapter \
+  --age-adapter agent_outputs/age_lora_h100_highres_aug_v1/best_adapter \
+  --split validation --out agent_outputs/lora_validation_highres_aug_v1
+```
+
+Augmentation is OFF unless `--augment` is supplied, preserving old behavior.
+Enabled augmentation independently samples a 0/90/180/270 degree turn, then a
+small rotation within +/-15 degrees, brightness factor 0.85..1.15 and contrast
+factor 0.85..1.15 per train image visit. Configurable via `--rotation-degrees`,
+`--brightness-jitter`, `--contrast-jitter`. No crop, blur, hue changes or flips.
+Rotation expands the frame and fills corners with median corner background color;
+this avoids cutting scale edges but can introduce interpolation/background cues
+and lower effective scale resolution under the fixed pixel budget. These choices
+are starting assumptions, not validated optima. The transformed image is reused
+for both chat-prefix and completion tokenization, preserving answer masking.
+Validation/test are NEVER randomly augmented; quality/age labels are unchanged.
+Configuration and seed are saved. Do not expect arbitrary hue robustness from
+brightness/contrast alone. All original images and existing runs are preserved.
+
+For a controlled validation stress test, add a FIXED perturbation to evaluation
+and use a new output directory, e.g. `--rotation 90`, `--brightness 0.85`, or
+`--contrast 0.85`. Evaluate each separately using both baseline and augmented
+adapters on the same entire validation cohort. Compare clean and perturbed
+age_gt_readable metrics to isolate age robustness. Pipeline metrics also include
+the unchanged quality gate's sensitivity. Do not claim robustness from clean
+accuracy alone or tune on test perturbations. Quality augmentation is a separate
+experiment: use `--task quality --augment` with its baseline pixel budget, not a
+simultaneous change to age and quality in the first paired comparison.
+
 ## Frozen Adapter Evaluation
 
 ```bash
