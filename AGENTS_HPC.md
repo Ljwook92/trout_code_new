@@ -202,6 +202,67 @@ shifts PDF page numbers. The preparation script validates the page count.
   not evidence of improved trout-scale prediction.
 # Fish-Level Age Propagation
 
+## Train-Only Visual Feature Memory (v3)
+
+Build a small audited pilot first, then a full train memory in a new directory:
+
+```bash
+python trout_feature_memory.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-adapter agent_outputs/quality_lora_v1/best_adapter \
+  --age-adapter agent_outputs/age_lora_h100_highres_v1/best_adapter \
+  --audit-predictions --limit 50 \
+  --out agent_outputs/feature_memory_pilot_v1 --dry-run
+```
+
+Remove `--dry-run` to build the memory. Use `--limit 0` (or omit it) and a NEW
+directory for full train memory. Audit runs quality/eligible-age classification
+on train to mark correct and incorrect cases, preserving both. It does not alter
+expert GT or count train accuracy as held-out performance. Omit
+`--audit-predictions` for faster feature-only indexing, with no correctness flags.
+
+Outputs: `features.npy` (normalized mean-pooled frozen Qwen visual tokens),
+`entries.jsonl` (expert labels, source, image/fish identities, hashes and optional
+correctness flags), `class_prototypes.json` (quality and age representatives, with
+fish balanced before averaging), `class_summary.csv`, and `memory_config.json`.
+These numeric features are NOT expert-verified annulus locations, interpretable
+texture descriptions or SimCLR-trained embeddings. Centroids can hide subtypes;
+retrieval uses individual image vectors, not a presumed universal age signature.
+The shared frozen Qwen visual encoder serves both adapters; it is not retrained.
+Feature extraction uses 200704 pixels by default and needs its own validation.
+
+Use the pilot memory during context-conditioned reinspection:
+
+```bash
+python trout_review_agents.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-adapter agent_outputs/quality_lora_v1/best_adapter \
+  --age-adapter agent_outputs/age_lora_h100_highres_v1/best_adapter \
+  --feature-memory agent_outputs/feature_memory_pilot_v1 --memory-top-k 2 \
+  --split validation --limit 20 --feedback-rounds 2 --max-calls 10 \
+  --out agent_outputs/review_validation_memory_v1 --dry-run
+```
+
+After passing, remove `--dry-run`. Search is cosine similarity, not class
+probability. Different-fish top-2 references are appended as actual images with
+their training labels during feedback only; the first prediction remains blind
+to reference labels. Correctness flags break exact similarity ties only; wrong
+train cases are not discarded. No same-fish references are returned for train
+queries. No validation/test case is indexed. Quality labels are expert image-level
+annotations; age search excludes bad/unknown/conflicting/unassigned cases using
+saved age eligibility and preserves direct vs propagated label source.
+
+Model/data/adapter checksums must match. Referenced image contents are checked
+before use. Incomplete interrupted memory builds cannot be loaded; restart with
+a new directory. GPU extraction and multi-reference inference require HPC
+verification. References are reduced to the index pixel budget to limit VRAM;
+target images retain review budget. This is retrieval-assisted reasoning, not
+weight training or a guarantee of accuracy. Textual feature descriptions and
+expert-confirmed annulus annotations are NOT generated or learned here.
+Compare v3 with and without memory on the same validation images and report
+coverage/errors/runtime. Freeze the new memory hash with the policy before test;
+v2 policy files cannot silently reuse a different retrieval protocol.
+
 ## Context-Conditioned Feedback Reinspection (v2)
 
 Unresolved quality or age checks now return to the corresponding task with the

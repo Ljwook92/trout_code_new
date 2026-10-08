@@ -11,7 +11,7 @@ import pandas as pd
 from evaluate_trout_vlm import evaluation_rows
 from train_trout_vlm import MODEL, REVISION, transform_image
 
-VERSION = "bounded_lora_review_v2_feedback"
+VERSION = "bounded_lora_review_v3_feature_memory"
 
 
 def sha(path):
@@ -146,13 +146,14 @@ class ReviewWorkflow:
 
 
 class LoRATools:
-    def __init__(self, quality_adapter, age_adapter, configs):
+    def __init__(self, quality_adapter, age_adapter, configs, memory=None, memory_top_k=2):
         import torch
         from peft import PeftModel
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
         if not torch.cuda.is_available():
             raise RuntimeError("Allocated CUDA GPU required")
         self.torch, self.configs, self.processors = torch, configs, {}
+        self.memory, self.memory_top_k, self.embedding_cache = memory, memory_top_k, {}
         self.processor_class = AutoProcessor
         base = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             MODEL, revision=REVISION, torch_dtype=torch.float16, attn_implementation="eager").to("cuda:0")
@@ -160,18 +161,63 @@ class LoRATools:
         self.model.load_adapter(str(age_adapter), adapter_name="age", is_trainable=False)
         self.model.config.use_cache = False
 
-    def inspect(self, path, task, pixels, rotation=0, contrast=1, feedback_context=None):
-        from PIL import Image, ImageOps
-        torch = self.torch
+    def processor(self, pixels):
         if pixels not in self.processors:
             self.processors[pixels] = self.processor_class.from_pretrained(
                 MODEL, revision=REVISION, use_fast=False, min_pixels=56 * 56, max_pixels=pixels)
-        processor, config = self.processors[pixels], self.configs[task]
+        return self.processors[pixels]
+
+    def embed(self, path, pixels):
+        from PIL import Image, ImageOps
+        torch, processor = self.torch, self.processor(pixels)
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Inspect scale."}]}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[text], images=[image], return_tensors="pt").to("cuda:0")
+        self.model.eval()
+        with torch.inference_mode():
+            features = self.model.get_base_model().get_image_features(inputs["pixel_values"], inputs["image_grid_thw"])
+            vector = features[0].float().mean(0)
+            norm = vector.norm()
+            if not torch.isfinite(vector).all() or norm.item() <= 0:
+                raise RuntimeError("Invalid Qwen visual feature")
+            result = (vector / norm).cpu().numpy()
+        return result
+
+    def inspect(self, path, task, pixels, rotation=0, contrast=1, feedback_context=None):
+        from PIL import Image, ImageOps
+        torch = self.torch
+        processor, config = self.processor(pixels), self.configs[task]
         self.model.set_adapter(task)
         self.model.eval()
         with Image.open(path) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")
         images, content = inspection_content(image, config["prompt"], rotation, contrast, feedback_context)
+        hits = []
+        if feedback_context is not None and self.memory is not None:
+            key = str(Path(path).resolve())
+            if key not in self.embedding_cache:
+                # Embedding is computed at the identical budget used to build the index.
+                self.embedding_cache.clear()
+                self.embedding_cache[key] = self.embed(path, self.memory.meta["pixels"])
+            hits = self.memory.search(self.embedding_cache[key], task, self.memory_top_k,
+                                      exclude_fish=self.memory.path_to_fish.get(key))
+            reference_content = []
+            for index, hit in enumerate(hits):
+                with Image.open(hit["path"]) as source:
+                    reference = ImageOps.exif_transpose(source).convert("RGB")
+                scale = min(1, (self.memory.meta["pixels"] / (reference.width * reference.height)) ** .5)
+                reference.thumbnail((max(1, int(reference.width * scale)), max(1, int(reference.height * scale))))
+                images.append(reference)
+                label = ("readable" if hit["class"] == 0 else "bad") if task == "quality" else str(hit["class"])
+                reference_content.extend([{"type": "text", "text": f"Training reference {index + 1}: {task} "
+                    f"label {label}; source {hit['label_source']}. Similarity is not proof of the target class."},
+                    {"type": "image"}])
+            # Image placeholder order matches [target original, target enhanced, references...].
+            content = content[:-1] + reference_content + [{"type": "text", "text": content[-1]["text"] +
+                "\nReferences are labeled training cases, not annotations of this target. "
+                "Use visible similarities AND differences; do not blindly copy reference labels."}]
         messages = [{"role": "system", "content": config["system"]}, {"role": "user", "content": content}]
         prefix = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         prefix_ids = processor(text=[prefix], images=images, return_tensors="pt")["input_ids"]
@@ -200,7 +246,7 @@ class LoRATools:
         order = sorted(range(len(weights)), key=lambda i: weights[i], reverse=True)
         return {"prediction": order[0], "margin": weights[order[0]] - weights[order[1]],
                 "ranking_weights": weights, "mean_response_log_likelihood": scores,
-                "calibrated_probability": False}
+                "calibrated_probability": False, "retrieved_training_references": hits}
 
 
 def inspection_content(image, prompt, rotation=0, contrast=1, feedback_context=None):
@@ -260,6 +306,8 @@ def main():
     parser.add_argument("--review-pixels", type=int, default=1605632)
     parser.add_argument("--max-calls", type=int, default=10)
     parser.add_argument("--feedback-rounds", type=int, default=2, help="0 disables; 2..4 bounded reinspection rounds per task")
+    parser.add_argument("--feature-memory", type=Path, help="Train-only visual memory used during feedback reinspection")
+    parser.add_argument("--memory-top-k", type=int, default=2, help="Different-fish references per reinspection, 1..2")
     parser.add_argument("--limit", type=int, default=20, help="0: all; default exploratory pilot")
     parser.add_argument("--frozen-policy", type=Path, help="Validation policy_settings.json required for test")
     parser.add_argument("--out", required=True, type=Path)
@@ -269,6 +317,8 @@ def main():
         raise ValueError("Invalid limit/budget/pixel settings")
     if args.feedback_rounds not in [0, 2, 3, 4]:
         raise ValueError("Feedback rounds must be 0 or 2..4")
+    if args.memory_top_k not in [1, 2] or (args.feature_memory and args.feedback_rounds == 0):
+        raise ValueError("Memory needs feedback and top-k 1 or 2")
     if not all(math.isfinite(x) and 0 <= x <= 1 for x in [args.quality_margin, args.age_margin]):
         raise ValueError("Ranking margins must be finite 0..1")
     label_hash = sha(args.labels)
@@ -284,6 +334,12 @@ def main():
               "review_pixels": args.review_pixels, "max_calls": args.max_calls, "feedback_rounds": args.feedback_rounds,
               "labels_sha256": label_hash, "adapter_hashes": adapter_hashes,
               "scoring": "mean_response_token_log_likelihood_softmax_not_calibrated"}
+    memory = None
+    if args.feature_memory:
+        from trout_feature_memory import FeatureMemory
+        memory = FeatureMemory(args.feature_memory, args.labels, adapter_hashes)
+    policy["memory"] = None if memory is None else {"config_sha256": sha(args.feature_memory / "memory_config.json"),
+                                                   "top_k": args.memory_top_k}
     if args.review_pixels <= max(policy["quality_pixels"], policy["age_pixels"]):
         raise ValueError("Review pixel budget must exceed both baseline budgets")
     if args.split == "test" and not args.frozen_policy:
@@ -302,7 +358,7 @@ def main():
         return
     if args.out.exists():
         raise FileExistsError("Choose a new output directory")
-    tools = LoRATools(args.quality_adapter, args.age_adapter, configs)
+    tools = LoRATools(args.quality_adapter, args.age_adapter, configs, memory, args.memory_top_k)
     workflow = ReviewWorkflow(tools, policy)
     args.out.mkdir(parents=True)
     (args.out / "policy_settings.json").write_text(json.dumps(policy, indent=2))
