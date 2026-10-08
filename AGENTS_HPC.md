@@ -202,6 +202,61 @@ shifts PDF page numbers. The preparation script validates the page count.
   not evidence of improved trout-scale prediction.
 # Fish-Level Age Propagation
 
+## Bounded Quality, Age and Review Roles
+
+`trout_review_agents.py` reuses the frozen quality and age adapters. This is an
+explicit bounded tool workflow, not a claim of autonomous biological reasoning.
+It does not train weights, learn from held-out GT, or fuse SimCLR into Qwen.
+
+```bash
+python trout_review_agents.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-adapter agent_outputs/quality_lora_v1/best_adapter \
+  --age-adapter agent_outputs/age_lora_h100_highres_v1/best_adapter \
+  --split validation --limit 20 \
+  --out agent_outputs/review_validation_pilot_v1 --dry-run
+```
+
+After this passes, remove `--dry-run` with the same arguments to load GPU tools.
+For full validation use `--limit 0` and a new output directory. Keep HF cache
+exports pointed to this compute node's `/local/scratch/$USER/trout_hf`.
+
+Quality role ranks readable/bad. A small margin requests a whole-frame
+high-resolution check. Disagreement or unresolved low margin refers to experts;
+clear bad stops before age inference. Age role ranks 0/1/2/3-or-older, and review
+checks the full image rotated 90 degrees. Unresolved age results request full-frame
+higher resolution, then a mild contrast increase. Any remaining disagreement or
+low margin is referred; majority vote never overrides disagreements. Agreement
+does not prove correctness. There is NO crop: full scale edges are preserved.
+High-resolution inspection is reprocessing the existing image, not recovery of
+new detail or a new acquisition. Default review budget is 1,605,632 pixels.
+
+Defaults `--quality-margin 0.05`, `--age-margin 0.05`, `--max-calls 6` are
+EXPLORATORY. A margin is the difference between the two largest softmax weights
+of mean candidate-response token log likelihoods. This is NOT a calibrated class
+probability, and response length/format can affect it. Default thresholds have
+not been validated. Rank inference differs from the earlier free JSON generation
+evaluation, so compare on the same data/decoder before attributing gains to agents.
+Each quality call performs two candidate forwards and each age call four;
+max-calls bounds image inspection calls, not individual neural-network forwards.
+GPU memory/runtime must be measured on HPC; local tests use fake tools only.
+
+`predictions.jsonl` preserves per-tool evidence (class rankings, margins, view
+settings, timing, review actions); `expert_review.csv` hides GT and lists image
+paths/reasons for actual human review, not automatic notification. `metrics.json`
+counts referrals as wrong in overall accuracy and separately reports accepted
+accuracy, referral rate, coverage, bad pass rate and runtime. This workflow does
+not run an oracle age model on GT-readable rejected images. It cannot claim
+improvement merely from discarding difficult cases. Outputs are never overwritten;
+interrupted runs retain partial logs but must restart in a new output directory.
+
+Freeze thresholds and tool budgets using validation. Test requires
+`--frozen-policy /path/to/validation_run/policy_settings.json` with matching data,
+adapter hashes and parameters. Do not retune based on test outcomes. No expert GT
+or fish ID enters inference; labels are attached only after each decision.
+Optional SimCLR disagreement checking remains a follow-up requiring an audited
+checkpoint with compatible fish splits; it is not silently enabled here.
+
 ## Train-Only Robustness Augmentation
 
 Keep the running high-resolution baseline unchanged. After it completes, train
