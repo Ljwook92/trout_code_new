@@ -58,6 +58,12 @@ class FeatureQwenTests(unittest.TestCase):
         self.assertGreater(projector.net[1].weight.grad.abs().sum().item(), 0)
         self.assertTrue(any(p.grad is not None and p.grad.abs().sum().item() > 0
                             for name, p in model.named_parameters() if "lora_" in name))
+        from evaluate_trout_feature_qwen import greedy_response
+        from tests.test_feature_qwen_evaluation import Tokenizer
+        model.eval()
+        raw, _ = greedy_response(model, projector, torch.randn(1, 1, 512),
+                                 ([1], [2]), Tokenizer(), max_new_tokens=1)
+        self.assertIsInstance(raw, str)
 
     def test_frozen_encoder_matches_pooled_backbone_and_preserves_batchnorm(self):
         from torchvision.models import resnet18

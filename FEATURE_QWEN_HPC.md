@@ -94,9 +94,47 @@ SimCLR classifier. This does NOT solve resolution limitations automatically.
 - `best_bundle/qwen_adapter/`: new Qwen language LoRA and tokenizer.
 - `best_bundle/selection.json`: selected epoch and losses.
 
-Inference must load the encoder, projector and new adapter together, using this
-script's token layout and `feature_batch`. Existing `evaluate_trout_vlm.py`,
-image-based quality debate, review scripts and their old LoRAs are NOT compatible
-with this bundle. This script implements supervised training, not a claim of
-expert-quality reasoning or a finished multi-agent decision policy. Classification
-evaluation and agent integration follow after checking these training artifacts.
+Inference must load the encoder, projector and new adapter together. Existing
+`evaluate_trout_vlm.py`, image-based quality debate, review scripts and their old
+LoRAs are NOT compatible with this bundle. This implements supervised training,
+not expert-quality reasoning or a finished multi-agent decision policy.
+
+## Validation Evaluation
+
+The feature-specific evaluator loads the frozen bundles, checks label hashes and
+saved train/validation partitions, and uses greedy JSON generation without GT
+answers, pixels, augmentation or gradient updates. Encoder normalization and
+float32 precision match training. Quality gate: 0 readable, 1 bad; pipeline class
+4 is bad, not age 4. Malformed/truncated answers abstain (-1) and count as wrong.
+
+First check files/weights without loading Qwen:
+
+```bash
+python evaluate_trout_feature_qwen.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-run agent_outputs/quality_feature_qwen_v1 \
+  --age-run agent_outputs/age_feature_qwen_v1 \
+  --split validation --out agent_outputs/feature_qwen_validation_v1 --dry-run
+```
+
+Then run the full validation partition:
+
+```bash
+python evaluate_trout_feature_qwen.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-run agent_outputs/quality_feature_qwen_v1 \
+  --age-run agent_outputs/age_feature_qwen_v1 \
+  --split validation --out agent_outputs/feature_qwen_validation_v1
+```
+
+`--limit 20` may be added for a quick, exploratory pilot; use a different output
+directory. For final held-out test evaluation, `--split test --confirm-test` is
+required. Do not tune settings after inspecting test results.
+
+Outputs: `comparison.csv`, `predictions.jsonl`, `evaluation_config.json` (bundle
+hashes), `feature_qwen_quality_report.txt`, `feature_qwen_age_gt_readable_report.txt`,
+`feature_qwen_pipeline_report.txt`, corresponding `_confusion.csv` matrices (with
+an abstain column), and `feature_qwen_coverage.json`. Age is inferred for every
+image without consulting GT; age-only metrics include only expert-readable images.
+The pipeline uses the predicted gate, so quality mistakes reduce end-to-end scores.
+This is generation-based classification, not calibrated probability estimation.
