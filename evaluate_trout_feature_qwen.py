@@ -84,6 +84,13 @@ def final_prediction(quality, age):
     return 4 if quality == 1 else age if quality == 0 else -1
 
 
+def predict_gated(image_tensor, predict):
+    quality = predict(image_tensor, "quality")
+    if quality[0] == 0 and quality[2] is None:
+        return quality, predict(image_tensor, "age"), False
+    return quality, (-1, None, None), True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels", type=Path, required=True)
@@ -174,15 +181,15 @@ def main():
         "labels_sha256": label_hash, "training_configs": configs, "bundle_hashes": hashes,
         "decoding": "greedy_free_generation_no_cache_max_48_tokens", "test_feedback": False,
         "gt_used_for_prediction": False, "qwen_pixel_input": False,
-        "note": "Oracle-readable age scoring is separate from the predicted quality gate."}, indent=2))
+        "age_inference_policy": "predicted_readable_only_no_GT_override",
+        "note": "All-readable age scores include gate skips as wrong; passed-readable age scores are conditional."}, indent=2))
     records = []
     for row in rows.to_dict("records"):
         with Image.open(row["path"]) as image:
             image_tensor = transform(ImageOps.exif_transpose(image).convert("RGB")).unsqueeze(0).to("cuda")
-        quality, qraw, qerror = predict(image_tensor, "quality")
-        # Infer age for EVERY image, irrespective of GT or gate, to isolate model performance.
-        # Age on GT-bad scales is not meaningful and is excluded from age-only metrics.
-        age, araw, aerror = predict(image_tensor, "age")
+        quality_result, age_result, age_skipped = predict_gated(image_tensor, predict)
+        quality, qraw, qerror = quality_result
+        age, araw, aerror = age_result
         readable = row["quality_gt"] == "readable"
         gt = int(row["age4"]) if readable else 4
         record = {"model": "feature_qwen", "scale_id": row["scale_id"], "fish_key": row["fish_key"],
@@ -191,11 +198,14 @@ def main():
                   "pipeline_gt": gt, "pipeline_prediction": final_prediction(quality, age),
                   "quality_raw": qraw, "age_raw": araw, "quality_error": qerror,
                   "age_error": aerror, "image_sha256": sha(row["path"])}
+        record["age_skipped"] = age_skipped
+        record["age_skip_reason"] = ("predicted_bad" if quality == 1 else "quality_abstained_or_error") if age_skipped else None
         records.append(record)
         with (args.out / "predictions.jsonl").open("a") as stream:
             stream.write(json.dumps(record) + "\n")
-        print(f"{row['scale_id']}: gate={quality} age={age} final={record['pipeline_prediction']} GT={gt}", flush=True)
-    summarize(records, args.out)
+        age_display = "skipped" if age_skipped else age
+        print(f"{row['scale_id']}: gate={quality} age={age_display} final={record['pipeline_prediction']} GT={gt}", flush=True)
+    summarize(records, args.out, age_gated=True)
 
 
 if __name__ == "__main__":

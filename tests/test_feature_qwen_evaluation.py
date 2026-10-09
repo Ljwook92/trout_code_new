@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pandas as pd
 import torch
 
-from evaluate_trout_feature_qwen import greedy_response, prompt_tokens, final_prediction, inspect_bundle
+from evaluate_trout_feature_qwen import greedy_response, prompt_tokens, final_prediction, inspect_bundle, predict_gated
+from evaluate_trout_vlm import summarize
 from train_trout_feature_qwen import FeatureProjector, MODEL, REVISION, PROTOCOL, SYSTEM, PROMPTS
 from prepare_trout_training_labels import prepare_labels
 
@@ -51,6 +52,48 @@ class ScriptedModel(torch.nn.Module):
 
 
 class FeatureEvaluationTests(unittest.TestCase):
+    def test_bad_and_unknown_gate_never_call_age(self):
+        for quality in [1, -1]:
+            calls = []
+            def predict(image, task):
+                calls.append(task)
+                if task != "quality":
+                    raise AssertionError("Age must not be invoked")
+                return quality, "quality response", None
+            gate, age, skipped = predict_gated(None, predict)
+            self.assertEqual(calls, ["quality"])
+            self.assertEqual(age, (-1, None, None))
+            self.assertTrue(skipped)
+
+    def test_readable_gate_calls_age_and_schema_error_does_not(self):
+        calls = []
+        def predict(image, task):
+            calls.append(task)
+            return (0, "readable", None) if task == "quality" else (2, "age", None)
+        gate, age, skipped = predict_gated(None, predict)
+        self.assertEqual(calls, ["quality", "age"])
+        self.assertEqual(age[0], 2)
+        self.assertFalse(skipped)
+        _, age, skipped = predict_gated(None, lambda image, task: (0, "broken", "schema error"))
+        self.assertTrue(skipped)
+        self.assertEqual(age[0], -1)
+
+    def test_gated_age_metrics_separate_skipped_and_passed_readable(self):
+        records = [{"model": "feature_qwen", "quality_gt": "readable", "age_gt": 0,
+                    "quality_prediction": 1, "age_prediction": -1, "pipeline_gt": 0, "pipeline_prediction": 4},
+                   {"model": "feature_qwen", "quality_gt": "readable", "age_gt": 1,
+                    "quality_prediction": 0, "age_prediction": 1, "pipeline_gt": 1, "pipeline_prediction": 1},
+                   {"model": "feature_qwen", "quality_gt": "bad", "age_gt": -1,
+                    "quality_prediction": 1, "age_prediction": -1, "pipeline_gt": 4, "pipeline_prediction": 4}]
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+            summarize(records, out, age_gated=True)
+            result = pd.read_csv(out / "comparison.csv").set_index("task")
+            self.assertEqual(result.loc["age_all_readable_gated", "accuracy"], 0.5)
+            self.assertEqual(result.loc["age_gate_passed_readable", "accuracy"], 1)
+            self.assertEqual(result.loc["age_gate_passed_readable", "support"], 1)
+            self.assertNotIn("age_gt_readable", result.index)
+
     def test_greedy_feature_only_generation_and_stop(self):
         tokenizer = Tokenizer()
         model = ScriptedModel('{"prediction": 2}')

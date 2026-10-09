@@ -109,6 +109,10 @@ saved train/validation partitions, and uses greedy JSON generation without GT
 answers, pixels, augmentation or gradient updates. Encoder normalization and
 float32 precision match training. Quality gate: 0 readable, 1 bad; pipeline class
 4 is bad, not age 4. Malformed/truncated answers abstain (-1) and count as wrong.
+Age inference runs ONLY for predicted readable (gate 0). Predicted bad or an
+unknown/error gate never invokes the age model, even when existing GT is readable.
+Skipped rows record `age_skipped=true`, `age_prediction=-1`, and null raw/error.
+Terminal output shows `age=skipped`, not a spurious numerical age.
 
 First check files/weights without loading Qwen:
 
@@ -135,11 +139,17 @@ directory. For final held-out test evaluation, `--split test --confirm-test` is
 required. Do not tune settings after inspecting test results.
 
 Outputs: `comparison.csv`, `predictions.jsonl`, `evaluation_config.json` (bundle
-hashes), `feature_qwen_quality_report.txt`, `feature_qwen_age_gt_readable_report.txt`,
-`feature_qwen_pipeline_report.txt`, corresponding `_confusion.csv` matrices (with
-an abstain column), and `feature_qwen_coverage.json`. Age is inferred for every
-image without consulting GT; age-only metrics include only expert-readable images.
-The pipeline uses the predicted gate, so quality mistakes reduce end-to-end scores.
+hashes), `feature_qwen_quality_report.txt`,
+`feature_qwen_age_all_readable_gated_report.txt` (all GT-readable images, with gate
+skips counted as wrong), `feature_qwen_age_gate_passed_readable_report.txt` (only
+GT-readable images passed by the gate), `feature_qwen_pipeline_report.txt`, their
+`_confusion.csv` matrices, and `feature_qwen_coverage.json`. A confusion column
+`skipped_or_abstain` distinguishes the all-readable gated age metric. Conditional
+age accuracy must be read together with coverage. Earlier `age_gt_readable` reports
+measured an independent age model and are not directly comparable to gated age
+accuracy. Preserve old outputs and use a new output folder for re-evaluation.
+The old image-LoRA evaluator also now respects the predicted gate; it remains
+incompatible with these feature bundles. Neither evaluator uses GT to bypass bad.
 This is generation-based classification, not calibrated probability estimation.
 
 ## Balanced Training Follow-Up (Train/Validation Only)

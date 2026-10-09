@@ -41,16 +41,23 @@ def decision(raw, task):
     return pred
 
 
-def summarize(records, out):
+def summarize(records, out, age_gated=False):
     data = pd.DataFrame(records)
     results = []
     for model, rows in data.groupby("model"):
         readable = rows.quality_gt.eq("readable")
-        for task, subset, truth, pred, names in [
+        age_names = ["0", "1", "2", "3 or older"]
+        tasks = [
             ("quality", rows, (rows.quality_gt == "bad").astype(int), rows.quality_prediction, ["readable", "bad"]),
-            ("age_gt_readable", rows[readable], rows.loc[readable, "age_gt"], rows.loc[readable, "age_prediction"], ["0", "1", "2", "3 or older"]),
+            ("age_all_readable_gated" if age_gated else "age_gt_readable",
+             rows[readable], rows.loc[readable, "age_gt"], rows.loc[readable, "age_prediction"], age_names),
             ("pipeline", rows, rows.pipeline_gt, rows.pipeline_prediction, ["0", "1", "2", "3 or older", "bad"]),
-        ]:
+        ]
+        if age_gated:
+            passed_readable = readable & rows.quality_prediction.eq(0)
+            tasks.insert(2, ("age_gate_passed_readable", rows[passed_readable],
+                            rows.loc[passed_readable, "age_gt"], rows.loc[passed_readable, "age_prediction"], age_names))
+        for task, subset, truth, pred, names in tasks:
             if subset.empty:
                 continue
             truth, pred = truth.astype(int), pred.astype(int)
@@ -64,7 +71,8 @@ def summarize(records, out):
             (out / f"{model}_{task}_report.txt").write_text(report)
             # Include the abstention column so errors do not disappear from the matrix.
             cm = confusion_matrix(truth, pred, labels=labels + [-1])[:len(labels), :]
-            pd.DataFrame(cm, index=names, columns=names + ["abstain"]).to_csv(out / f"{model}_{task}_confusion.csv")
+            last_column = "skipped_or_abstain" if task == "age_all_readable_gated" else "abstain"
+            pd.DataFrame(cm, index=names, columns=names + [last_column]).to_csv(out / f"{model}_{task}_confusion.csv")
         bad = ~readable
         accepted = rows.quality_prediction.eq(0)
         rates = {"readable_coverage": float(accepted[readable].mean()) if readable.any() else None,
@@ -161,6 +169,7 @@ def main():
     provenance = {"split": args.split, "limit": args.limit, "labels_sha256": label_hash,
                   "compare_base": args.compare_base, "model": MODEL, "revision": REVISION,
                   "training_configs": configs, "test_feedback": False,
+                  "age_inference_policy": "predicted_readable_only_no_GT_override",
                   "fixed_perturbation": {"rotation": args.rotation, "brightness": args.brightness,
                                          "contrast": args.contrast}}
     for task, folder in [("quality", args.quality_adapter), ("age", args.age_adapter)]:
@@ -170,9 +179,9 @@ def main():
     for mode in (["base", "lora"] if args.compare_base else ["lora"]):
         for row in rows.to_dict("records"):
             q, qraw, qerror = predict(row["path"], "quality", mode)
-            # Oracle-readable age evaluation is separate from the predicted-quality pipeline.
+            # Only the predicted readable gate may invoke age inference; GT cannot bypass it.
             age, araw, aerror = (-1, None, None)
-            if row["quality_gt"] == "readable" or q == 0:
+            if q == 0 and qerror is None:
                 age, araw, aerror = predict(row["path"], "age", mode)
             gt = int(row["age4"]) if row["quality_gt"] == "readable" else 4
             record = {"model": mode, "scale_id": row["scale_id"], "fish_key": row["fish_key"],
@@ -180,12 +189,14 @@ def main():
                       "quality_prediction": q, "age_prediction": age, "pipeline_gt": gt,
                       "pipeline_prediction": 4 if q == 1 else age if q == 0 else -1,
                       "quality_raw": qraw, "age_raw": araw, "quality_error": qerror, "age_error": aerror,
+                      "age_skipped": q != 0 or qerror is not None,
                       "image_sha256": hashlib.sha256(Path(row["path"]).read_bytes()).hexdigest()}
             records.append(record)
             with (args.out / "predictions.jsonl").open("a") as handle:
                 handle.write(json.dumps(record) + "\n")
-            print(f"{mode} {row['scale_id']}: gate={q}, age={age}, final={record['pipeline_prediction']}, GT={gt}", flush=True)
-    summarize(records, args.out)
+            age_display = "skipped" if record["age_skipped"] else age
+            print(f"{mode} {row['scale_id']}: gate={q}, age={age_display}, final={record['pipeline_prediction']}, GT={gt}", flush=True)
+    summarize(records, args.out, age_gated=True)
 
 
 if __name__ == "__main__":
