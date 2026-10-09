@@ -477,6 +477,49 @@ still needed to establish classification accuracy. `best_adapter/` contains LoRA
 weights, not the complete base model. Existing `trout_agents.py` does not yet
 load these adapters: its old inference results will not change automatically.
 
+## Visual audit of feature-memory retrieval
+
+Run this CPU-only diagnostic after the paired no-memory and memory evaluations:
+
+```bash
+python audit_trout_retrieval.py \
+  --baseline agent_outputs/review_validation_feedback_v2 \
+  --memory-run agent_outputs/review_validation_memory_v1 \
+  --feature-memory agent_outputs/feature_memory_pilot_v1 \
+  --out agent_outputs/retrieval_audit_v1
+```
+
+Use the actual no-memory output folder if its name differs. This does not load
+Qwen, retrain adapters, or change memory. It requires identical cohorts, expert
+GT, adapter hashes, partitions and non-memory policy settings. Protocol versions
+may differ: changes are descriptive, not a controlled causal estimate. Recorded
+references must belong to the saved train memory, with no held-out fish overlap.
+Target and reference image checksums are verified before previews are generated.
+
+Download `retrieval_audit_v1/retrieval_audit.html` from HPC and open it locally.
+It is self-contained: changed decisions, actual retrieved train images, and both
+inspection histories are displayed together. Use `--all-cases` in a NEW output
+directory to inspect unchanged cases as well. Previews default to 2400 pixels on
+the longest side, retain the full frame, and are JPEG encoded; they are not the
+exact preprocessed tensors used by Qwen. Inspect full-resolution originals when
+fine bands are unclear. High cosine similarity does not prove annual-band
+similarity. Displayed train audit correctness is not generalization performance.
+
+Fill `review_annotations_template.csv` for each target/reference pair. Suggested
+values for color, shape, growth-pattern and physical-quality similarity are
+`low`, `medium`, `high`, or `unclear`; annual-band evidence is `visible`, `absent`,
+or `unclear`; reference relevance is `useful`, `superficial`, or `unclear`.
+Separate crowded fine circuli from genuine completed annual annuli. Age GT alone
+does not verify the location of an annulus. Quality references should be judged
+by damage/focus/occlusion, not ring count. Record reviewer and observable evidence
+in notes. These post-hoc annotations NEVER automatically become training labels
+or memory entries. GT is visible for diagnostics, so this is not blinded expert
+validation. Do not tune the model on test-review examples.
+
+Outputs also include `changed_cases.csv`, per-call `retrieved_examples.csv`,
+`summary.json`, and hashed input provenance in `audit_config.json`. No outputs
+are overwritten. Missing images or provenance mismatches stop the audit.
+
 Prepare supervised training labels without changing the existing fish split:
 
 ```bash
