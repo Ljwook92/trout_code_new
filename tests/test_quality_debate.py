@@ -65,7 +65,7 @@ class QualityDebateTests(unittest.TestCase):
     def test_schema_error_and_unlocalized_damage_refer(self):
         item = assessment(1)
         item["evidence"]["checks"][0]["bbox"] = None
-        with self.assertRaisesRegex(ValueError, "localized"):
+        with self.assertRaisesRegex(ValueError, "textual location"):
             validate_evidence(item["evidence"])
         result = QualityDebate(FakeTools([item] * 6), self.policy).run("anonymous.png")
         self.assertEqual(result["prediction"], -1)
@@ -75,6 +75,7 @@ class QualityDebateTests(unittest.TestCase):
         failure = {"prediction": -1, "margin": 0, "evidence": None, "raw_evidence": "invalid JSON", "error": "bad schema"}
         result = QualityDebate(FakeTools([failure] * 6), self.policy).run("anonymous.png")
         self.assertEqual(result["rounds"][0]["assessments"][0]["raw_evidence"], "invalid JSON")
+        self.assertEqual(result["rounds"][0]["assessments"][0]["error"], "bad schema")
         items = [assessment(0), assessment(1), assessment(1), assessment(0), assessment(0), assessment(0)]
         result = QualityDebate(FakeTools(items), self.policy).run("anonymous.png")
         self.assertEqual(result["prediction"], -1)
@@ -86,6 +87,42 @@ class QualityDebateTests(unittest.TestCase):
         self.assertNotIn("quality_gt", text)
         self.assertNotIn("secret", text)
         self.assertNotIn("hidden", text)
+
+    def test_placeholder_observation_and_peer_template_rejected(self):
+        for placeholder in ["...", "short visible evidence", "SHORT VISIBLE EVIDENCE"]:
+            value = assessment()["evidence"]
+            value["checks"][0]["observation"] = placeholder
+            with self.assertRaisesRegex(ValueError, "placeholder"):
+                validate_evidence(value)
+        value = assessment()["evidence"]
+        value["peer_response"] = "specific agreement or disagreement with previous checks; none on first round"
+        with self.assertRaisesRegex(ValueError, "template"):
+            validate_evidence(value)
+
+    def test_unknown_pixel_coordinates_not_guessed_or_used_for_gate(self):
+        value = assessment(1)["evidence"]
+        value["checks"][0]["bbox"] = [275, 274, 543, 528]
+        with self.assertRaisesRegex(ValueError, "textual location"):
+            validate_evidence(value)
+        value["checks"][0]["location"] = "Central growth-line region"
+        cleaned = validate_evidence(value)
+        self.assertIsNone(cleaned["checks"][0]["bbox"])
+        self.assertEqual(cleaned["checks"][0]["location"], "Central growth-line region")
+        self.assertEqual(len(cleaned["warnings"]), 1)
+        self.assertEqual(validate_evidence(cleaned), cleaned)
+
+    def test_text_location_accepts_defect_without_numeric_bbox(self):
+        item = assessment(1)
+        item["evidence"]["checks"][0].update(bbox=None, location="Upper right scale tissue")
+        result = QualityDebate(FakeTools([item, item]), self.policy).run("anonymous.png")
+        self.assertEqual(result["prediction"], 1)
+        self.assertFalse(result["age_allowed"])
+
+    def test_evidence_prompt_has_no_literal_observation_template(self):
+        from trout_quality_debate import EVIDENCE_PROMPT
+        self.assertNotIn('"observation":', EVIDENCE_PROMPT)
+        self.assertNotIn("short visible evidence", EVIDENCE_PROMPT)
+        self.assertNotIn("...", EVIDENCE_PROMPT)
 
     def test_rows_and_feedback_train_only_and_reports(self):
         with tempfile.TemporaryDirectory() as temp:

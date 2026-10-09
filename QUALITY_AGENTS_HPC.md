@@ -6,6 +6,24 @@ allocated GPU node and the existing `requirements-vlm-training.txt` environment.
 It shares one pinned Qwen2.5-VL-3B base, with TWO separately trained LoRA adapters.
 Agents are different roles/weights, not independent biological experts.
 
+## Evidence-format repair (v2)
+
+The first HPC pilot showed copied schema examples and unlabelled pixel-like
+coordinates. The v2 evidence prompt uses field instructions without literal
+observation sentences to copy. Defect locations are now described in words;
+numeric boxes are NOT requested. Existing role adapters remain compatible:
+their training system and decision prompt have not changed. No retraining is
+needed just to test this inference repair. Use a NEW evaluation output directory,
+such as `quality_debate_validation_pilot_v2`.
+
+Copied observations such as ellipses or the old template phrases are rejected,
+not counted as preservation evidence. Unknown coordinate units are never guessed
+or rescaled: unsolicited invalid boxes are ignored with logged warnings. A bad
+claim still requires a textual location or a valid normalized box. A normalized
+box remains an unverified model claim, not expert localization. Original evidence
+errors and raw model responses are preserved rather than replaced with a generic
+binary-decision error. Budget, margins and abstention accounting are unchanged.
+
 ## 1. Train both quality role adapters
 
 ```bash
@@ -59,7 +77,7 @@ python trout_quality_debate.py run \
 ```
 
 Each agent generates center/material/visibility observations. Claimed defects
-require normalized boxes; boxes are predictions, NOT expert annotations. The
+require a location in words, not ambiguous numeric coordinates. The
 agent then ranks readable/bad responses conditioned on its own evidence. This
 uses two teacher-forced candidate forwards, not calibrated class probabilities.
 The evidence generation is greedy. Raw JSON failures are recorded and cannot

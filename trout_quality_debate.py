@@ -1,5 +1,6 @@
 """Two-role, image-grounded quality debate; GT enters only post-inference audits."""
 import argparse
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -11,7 +12,7 @@ from PIL import Image, ImageOps
 from train_trout_vlm import MODEL, REVISION
 from trout_agents import parse_response, sha
 
-VERSION = "quality_two_agent_debate_v1"
+VERSION = "quality_two_agent_debate_v2_text_locations"
 ROLES = ("bad", "readable")
 CRITERIA = ("center", "material", "visibility")
 RULES = (
@@ -34,14 +35,16 @@ ROLE_TEXT = {
 }
 DECISION_PROMPT = 'Decide usability from the image. Return one JSON object: {"decision": "readable"} or {"decision": "bad"}.'
 EVIDENCE_PROMPT = (
-    'Return JSON only: {"checks": [{"criterion": "center", "state": "preserved|damaged|uncertain", '
-    '"observation": "short visible evidence", "bbox": [x0,y0,x1,y1]}, '
-    '{"criterion": "material", "state": "preserved|damaged|uncertain", "observation": "...", "bbox": null}, '
-    '{"criterion": "visibility", "state": "preserved|damaged|uncertain", "observation": "...", "bbox": null}], '
-    '"peer_response": "specific agreement or disagreement with previous checks; none on first round"}. '
-    'Use exactly one check per criterion. Bboxes are normalized 0..1 in the full image; a damaged check '
-    'must locate its observed defect with a bbox. Use state uncertain when evidence is insufficient. '
-    'No decision, age, confidence or filenames are requested.'
+    'Inspect THIS image and report concrete physical observations. Return one JSON object with '
+    'a checks array and a peer_response string. The checks array must have exactly three objects, '
+    'one per criterion: center, material, visibility. Each object must contain criterion, state, '
+    'observation, and location. Choose one state: preserved, damaged, or uncertain. '
+    'Write an original, image-specific observation in one short sentence. '
+    'For location, describe the visible region in words, not numeric coordinates. '
+    'For damaged, identify where the defect is visible; for preserved or uncertain location may be empty. '
+    'Do not output bounding boxes. Do not copy these instructions, field descriptions, or placeholders. '
+    'The peer_response must address a specific earlier observation if history exists; otherwise use an empty string. '
+    'Use uncertain when an observation cannot be established. No decision, age, confidence, or filenames are requested.'
 )
 
 
@@ -64,27 +67,44 @@ def quality_rows(table, split):
 def validate_evidence(value):
     if not isinstance(value, dict) or not isinstance(value.get("checks"), list) or len(value["checks"]) != 3:
         raise ValueError("Expected three structured quality checks")
-    cleaned, seen = [], set()
+    cleaned, seen, warnings = [], set(), []
     for check in value["checks"]:
+        if not isinstance(check, dict):
+            raise ValueError("Each quality check must be an object")
         criterion, state = check.get("criterion"), check.get("state")
         observation, bbox = check.get("observation"), check.get("bbox")
+        location = check.get("location", "")
         if criterion not in CRITERIA or criterion in seen or state not in ["preserved", "damaged", "uncertain"]:
             raise ValueError("Invalid or duplicate quality criterion/state")
         if not isinstance(observation, str) or not observation.strip() or len(observation) > 600:
             raise ValueError("Missing or oversized visible observation")
+        if (not observation.strip(" .") or observation.strip().lower() in
+                {"short visible evidence", "short observed evidence", "your observation", "observation"}):
+            raise ValueError("Copied placeholder is not image evidence")
+        if not isinstance(location, str) or len(location) > 300:
+            raise ValueError("Invalid textual defect location")
         if bbox is not None:
             if (not isinstance(bbox, list) or len(bbox) != 4 or
                     any(type(x) not in [int, float] or not math.isfinite(x) or not 0 <= x <= 1 for x in bbox)
                     or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]):
-                raise ValueError("Invalid normalized defect bbox")
-        if state == "damaged" and bbox is None:
-            raise ValueError("A claimed defect must be localized")
+                # Coordinate units/frame cannot be inferred safely. Preserve raw output, never rescale guessed pixels.
+                warnings.append(criterion + ": ignored bbox with unknown/invalid coordinates")
+                bbox = None
+        if state == "damaged" and bbox is None and location.strip().lower() in {"", "unknown", "unspecified", "..."}:
+            raise ValueError("A claimed defect must have a textual location or valid normalized bbox")
         seen.add(criterion)
-        cleaned.append({"criterion": criterion, "state": state, "observation": observation.strip(), "bbox": bbox})
+        cleaned.append({"criterion": criterion, "state": state, "observation": observation.strip(),
+                        "location": location.strip(), "bbox": bbox})
     peer = value.get("peer_response", "")
     if not isinstance(peer, str) or len(peer) > 1200:
         raise ValueError("Invalid peer response")
-    return {"checks": cleaned, "peer_response": peer, "expert_verified": False}
+    if "specific agreement or disagreement with previous checks" in peer.lower():
+        raise ValueError("Copied peer-response template is not a review")
+    prior_warnings = value.get("warnings", [])
+    if not isinstance(prior_warnings, list) or not all(isinstance(w, str) for w in prior_warnings):
+        raise ValueError("Invalid evidence warnings")
+    return {"checks": cleaned, "peer_response": peer, "expert_verified": False,
+            "warnings": list(dict.fromkeys(prior_warnings + warnings))}
 
 
 def evidence_supports(assessment):
@@ -117,6 +137,9 @@ class QualityDebate:
                 result = {}
                 try:
                     result = self.tools.assess(path, role, pixels, history)
+                    if result.get("error"):
+                        current.append({**result, "prediction": -1, "margin": 0, "evidence": None, "role": role})
+                        continue
                     if type(result.get("prediction")) is not int or result["prediction"] not in [0, 1]:
                         raise ValueError("Invalid binary quality decision")
                     if not math.isfinite(result.get("margin", float("nan"))) or not 0 <= result["margin"] <= 1:
@@ -217,6 +240,8 @@ def write_reports(records, out):
         "readable_coverage": rate(readable, pred.eq(0)), "readable_rejected_as_bad": rate(readable, pred.eq(1)),
         "bad_pass_rate": rate(~readable, pred.eq(0)), "mean_rounds": float(rows.rounds.map(len).mean()),
         "images_with_schema_error": sum(any(a.get("error") for turn in r["rounds"] for a in turn["assessments"]) for r in records),
+        "assessment_error_counts": dict(Counter(a["error"] for r in records for turn in r["rounds"]
+                                                 for a in turn["assessments"] if a.get("error"))),
         "note": "Model evidence/bboxes and margins are unverified. Agreement is not expert confirmation; referrals count as incorrect."}
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     (out / "quality_report.txt").write_text(classification_report(truth, pred, labels=[0, 1],
