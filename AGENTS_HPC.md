@@ -1,5 +1,9 @@
 # Expert-Guided Visual Agents on HPC
 
+For the new two-role, separately trained Bad/Readable quality debate, see
+[QUALITY_AGENTS_HPC.md](QUALITY_AGENTS_HPC.md). It is a separate experiment;
+the original inference-only architecture below is retained for reference.
+
 This is a local, GPU inference and reflection-memory experiment, not PPO/RL or
 VLM fine-tuning. It does not update ResNet/SimCLR weights. No cloud API is used.
 Do not interpret fluent explanations as proof of correct annulus detection.
