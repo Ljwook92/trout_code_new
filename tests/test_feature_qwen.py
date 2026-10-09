@@ -10,6 +10,7 @@ import torch
 from train_trout_feature_qwen import (
     FeatureProjector, FrozenScaleEncoder, answer_tokens, backbone_state,
     check_encoder_provenance, expert_rows, feature_batch,
+    class_sampling_weights, epoch_rows, validation_metrics, selection_key,
 )
 from prepare_trout_training_labels import prepare_labels
 
@@ -121,6 +122,47 @@ class FeatureQwenTests(unittest.TestCase):
         table.loc[0, "split"] = "test"
         with self.assertRaises(ValueError):
             expert_rows(table, "age")
+
+    def test_balanced_sampling_uses_train_counts_and_is_reproducible(self):
+        frame = pd.DataFrame({"scale_id": [f"s{i}" for i in range(100)],
+                              "answer": ["common"] * 90 + ["rare"] * 10,
+                              "split": ["train"] * 100})
+        weights = class_sampling_weights(frame)
+        mass = weights.groupby(frame.answer).sum()
+        self.assertAlmostEqual(mass["common"], mass["rare"])
+        a = epoch_rows(frame, 100, True)
+        b = epoch_rows(frame, 100, True)
+        self.assertTrue(a.equals(b))
+        self.assertEqual(len(a), len(frame))
+        self.assertTrue(set(a.scale_id) <= set(frame.scale_id))
+        self.assertTrue(a["split"].eq("train").all())
+        self.assertGreater(a.answer.eq("rare").sum(), 25)
+        ordinary = epoch_rows(frame, 100, False)
+        self.assertEqual(set(ordinary.scale_id), set(frame.scale_id))
+        self.assertEqual(ordinary.answer.eq("rare").sum(), 10)
+
+    def test_generated_validation_metrics_count_abstentions_as_wrong(self):
+        metrics = validation_metrics([0, 1, 2, 3], [0, 1, 1, -1], "age")
+        self.assertEqual(metrics["validation_accuracy"], 0.5)
+        self.assertEqual(metrics["validation_balanced_accuracy"], 0.5)
+        self.assertEqual(metrics["validation_abstention_rate"], 0.25)
+        self.assertEqual(metrics["validation_recall_3"], 0)
+        quality = validation_metrics([0, 0, 0, 1, 1], [0, 1, -1, 0, 1], "quality")
+        self.assertEqual(quality["validation_bad_pass_rate"], 0.5)
+        self.assertAlmostEqual(quality["validation_readable_coverage"], 1 / 3)
+        with self.assertRaises(ValueError):
+            validation_metrics([0, 1, 2, 3], [0], "age")
+
+    def test_selection_uses_macro_f1_and_loss_only_breaks_ties(self):
+        low_f1 = {"validation_macro_f1": 0.70, "validation_loss": 0.05}
+        high_f1 = {"validation_macro_f1": 0.80, "validation_loss": 0.10}
+        self.assertGreater(selection_key(high_f1, "validation_macro_f1"),
+                           selection_key(low_f1, "validation_macro_f1"))
+        self.assertGreater(selection_key(low_f1, "validation_answer_loss"),
+                           selection_key(high_f1, "validation_answer_loss"))
+        tie = {"validation_macro_f1": 0.80, "validation_loss": 0.09}
+        self.assertGreater(selection_key(tie, "validation_macro_f1"),
+                           selection_key(high_f1, "validation_macro_f1"))
 
 
 if __name__ == "__main__":

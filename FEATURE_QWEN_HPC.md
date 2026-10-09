@@ -138,3 +138,61 @@ an abstain column), and `feature_qwen_coverage.json`. Age is inferred for every
 image without consulting GT; age-only metrics include only expert-readable images.
 The pipeline uses the predicted gate, so quality mistakes reduce end-to-end scores.
 This is generation-based classification, not calibrated probability estimation.
+
+## Balanced Training Follow-Up (Train/Validation Only)
+
+Preserve the original v1 bundles and their already-inspected test results. This
+follow-up uses the SAME expert GT, encoder, image size, splits, seed and architecture,
+with two explicit changes: inverse-class-frequency train sampling and best-epoch
+selection by generated validation macro F1. It is a combined experiment, not an
+isolated estimate of the effect of sampling. No improvement is guaranteed.
+
+```bash
+ENCODER_RUN="/home/jlc3q/data/Trout/trout_code_new/model_outputs/age4_two_stage_search_v4"
+ENCODER_CHECKPOINT="$ENCODER_RUN/search_trials/resnet18_pre000_simclr.pt"
+
+python train_trout_feature_qwen.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --encoder-run "$ENCODER_RUN" --encoder-checkpoint "$ENCODER_CHECKPOINT" \
+  --task age --class-balanced --selection-metric validation_macro_f1 \
+  --out agent_outputs/age_feature_qwen_balanced_v2
+
+python train_trout_feature_qwen.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --encoder-run "$ENCODER_RUN" --encoder-checkpoint "$ENCODER_CHECKPOINT" \
+  --task quality --class-balanced --selection-metric validation_macro_f1 \
+  --out agent_outputs/quality_feature_qwen_balanced_v2
+```
+
+Use the exact encoder used by v1 (check its `training_config.json`); the pre000
+path above matches the previous v1 command. The script does not initialize from
+the v1 LoRAs: it retrains the projector/LoRA from the same base and seed to keep
+the comparison interpretable. Augmentation remains off for this experiment.
+
+Each epoch draws the original number of training rows, WITH replacement, using
+only training class counts. Classes have equal expected sampling probability,
+not guaranteed equal sampled counts. This adds neither new GT nor new fish.
+Validation/test rows are not resampled. Config records original class counts;
+history records sampled counts and unique images each epoch.
+
+When selecting macro F1, the script generates class predictions on all validation
+rows each epoch and records accuracy, balanced accuracy, macro F1, per-class
+recall and abstention rate. Quality additionally records bad pass rate, readable
+coverage and false bad rejections. Tied macro F1 is broken by lower answer loss.
+`validation_predictions_epoch_N.csv` retains predictions/raw answers for audit.
+This costs extra inference time; defaults still preserve v1 loss-only selection.
+
+After BOTH training jobs finish:
+
+```bash
+python evaluate_trout_feature_qwen.py \
+  --labels agent_outputs/supervised_labels_v1.csv \
+  --quality-run agent_outputs/quality_feature_qwen_balanced_v2 \
+  --age-run agent_outputs/age_feature_qwen_balanced_v2 \
+  --split validation --out agent_outputs/feature_qwen_balanced_validation_v2
+```
+
+Compare with v1 validation, particularly age 2/3+ recall, bad pass rate, readable
+coverage, and overall macro F1. Keep the existing v1 test result as the reported
+fixed-model result. Reusing that test for this new experiment is exploratory,
+not a fresh independent final evaluation; do not use it to select improvements.

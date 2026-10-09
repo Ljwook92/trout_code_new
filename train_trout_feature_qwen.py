@@ -170,6 +170,52 @@ def feature_batch(model, projector, features, tokens):
             "use_cache": False}
 
 
+def class_sampling_weights(train):
+    counts = train.answer.value_counts()
+    if train.empty or train.answer.isna().any():
+        raise ValueError("Balanced sampling requires nonempty expert answers")
+    return train.answer.map(1.0 / counts)
+
+
+def epoch_rows(train, seed, class_balanced=False):
+    if not class_balanced:
+        return train.sample(frac=1, random_state=seed).reset_index(drop=True)
+    sampler = torch.utils.data.WeightedRandomSampler(
+        torch.tensor(class_sampling_weights(train).to_numpy(), dtype=torch.double),
+        num_samples=len(train), replacement=True,
+        generator=torch.Generator().manual_seed(seed))
+    return train.iloc[list(sampler)].reset_index(drop=True)
+
+
+def validation_metrics(truth, prediction, task):
+    from sklearn.metrics import f1_score
+    labels = list(range(4 if task == "age" else 2))
+    truth, prediction = pd.Series(truth), pd.Series(prediction)
+    if (truth.empty or len(truth) != len(prediction) or set(truth) != set(labels)
+            or not prediction.isin(labels + [-1]).all()):
+        raise ValueError("Validation requires all expert classes and valid predictions")
+    recalls = {label: float(prediction[truth.eq(label)].eq(label).mean()) for label in labels}
+    metrics = {"validation_accuracy": float(prediction.eq(truth).mean()),
+               "validation_balanced_accuracy": sum(recalls.values()) / len(labels),
+               "validation_macro_f1": float(f1_score(truth, prediction, labels=labels,
+                                                    average="macro", zero_division=0)),
+               "validation_abstention_rate": float(prediction.eq(-1).mean()),
+               **{f"validation_recall_{label}": recall for label, recall in recalls.items()}}
+    if task == "quality":
+        metrics.update({"validation_bad_pass_rate": float(prediction[truth.eq(1)].eq(0).mean()),
+                        "validation_readable_coverage": float(prediction[truth.eq(0)].eq(0).mean()),
+                        "validation_readable_rejected_as_bad": float(prediction[truth.eq(0)].eq(1).mean())})
+    return metrics
+
+
+def selection_key(record, metric):
+    if metric == "validation_answer_loss":
+        return (-record["validation_loss"], -record["validation_loss"])
+    if metric == "validation_macro_f1":
+        return (record["validation_macro_f1"], -record["validation_loss"])
+    raise ValueError("Unknown selection metric")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels", type=Path, required=True)
@@ -188,6 +234,11 @@ def main():
     parser.add_argument("--seed", type=int, default=100)
     parser.add_argument("--augment", action="store_true", help="Train-only quarter rotation and contrast; no crop")
     parser.add_argument("--contrast-jitter", type=float, default=0.15)
+    parser.add_argument("--class-balanced", action="store_true",
+                        help="Train-only inverse-class-frequency sampling with replacement")
+    parser.add_argument("--selection-metric", choices=["validation_answer_loss", "validation_macro_f1"],
+                        default="validation_answer_loss",
+                        help="Macro F1 uses actual greedy class predictions each epoch; no test use")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if (args.epochs < 1 or args.accumulation < 1 or args.rank < 1
@@ -206,6 +257,7 @@ def main():
             raise FileNotFoundError(str(missing.iloc[0]))
     print(f"task={args.task} expert train={len(train)} validation={len(val)}; test unused", flush=True)
     print(train.answer.value_counts().to_string(), flush=True)
+    print("Class-balanced sampling:", args.class_balanced, "; selection:", args.selection_metric, flush=True)
     if args.dry_run:
         print("Dry run passed: checkpoint/splits/GT/images checked; no Qwen loaded or output written")
         return
@@ -255,7 +307,9 @@ def main():
         "supervision": "expert_GT_only_response_cross_entropy", "pseudo_labels": False,
         "distillation": False, "qwen_pixel_input": False, "encoder_frozen": True,
         "uses_length_weight": False, "image_size": 224, "crop": False,
-        "selection_metric": "validation_answer_loss", "reasoning_supervision": False,
+        "selection_metric": args.selection_metric, "reasoning_supervision": False,
+        "sampling_protocol": "inverse_class_frequency_replacement" if args.class_balanced else "shuffle_without_replacement",
+        "training_class_counts": {answer: int(count) for answer, count in train.answer.value_counts().items()},
         "system": SYSTEM, "prompt": PROMPTS[args.task], "dtype": str(dtype)})
     (args.out / "training_config.json").write_text(json.dumps(config, indent=2))
     pd.concat([train, val]).to_csv(args.out / "used_rows.csv", index=False)
@@ -276,13 +330,37 @@ def main():
             raise RuntimeError(f"Non-finite loss for {row.scale_id}")
         return loss
 
-    best_loss, history = float("inf"), []
+    def generated_validation():
+        from evaluate_trout_feature_qwen import greedy_response, prompt_tokens
+        from evaluate_trout_vlm import decision
+        prompt = prompt_tokens(tokenizer, args.task)
+        records = []
+        for row in tqdm(val.itertuples(index=False), total=len(val), desc="validation classes"):
+            with Image.open(row.path) as image:
+                image = ImageOps.exif_transpose(image).convert("RGB")
+            with torch.inference_mode():
+                features = encoder(transform(image).unsqueeze(0).to("cuda"))
+                with torch.autocast("cuda", dtype=dtype):
+                    raw, error = greedy_response(model, projector, features, prompt, tokenizer)
+            pred = -1
+            if error is None:
+                try:
+                    pred = decision(raw, args.task)
+                except ValueError as exc:
+                    error = str(exc)
+            truth = int(row.age4) if args.task == "age" else int(row.quality_gt == "bad")
+            records.append({"scale_id": row.scale_id, "fish_key": row.fish_key,
+                            "gt": truth, "prediction": pred, "raw": raw, "error": error})
+        frame = pd.DataFrame(records)
+        return frame, validation_metrics(frame["gt"].tolist(), frame.prediction.tolist(), args.task)
+
+    best_key, history = (-float("inf"), -float("inf")), []
     trainable = [p for group in optimizer.param_groups for p in group["params"]]
     for epoch in range(args.epochs):
         model.train()
         projector.train()
         encoder.eval()
-        shuffled = train.sample(frac=1, random_state=args.seed + epoch).reset_index(drop=True)
+        shuffled = epoch_rows(train, args.seed + epoch, args.class_balanced)
         total = 0.0
         optimizer.zero_grad(set_to_none=True)
         for i, row in enumerate(tqdm(shuffled.itertuples(index=False), total=len(train),
@@ -305,11 +383,18 @@ def main():
             val_loss = sum(loss_for(row, False).item() for row in tqdm(
                 val.itertuples(index=False), total=len(val), desc="validation")) / len(val)
         record = {"epoch": epoch + 1, "train_loss": total / len(train), "validation_loss": val_loss}
+        if args.selection_metric == "validation_macro_f1":
+            predictions, metrics = generated_validation()
+            record.update(metrics)
+            predictions.to_csv(args.out / f"validation_predictions_epoch_{epoch + 1}.csv", index=False)
+        record["train_sampled_unique_images"] = shuffled.scale_id.nunique()
+        record["train_sampled_class_counts"] = shuffled.answer.value_counts().to_json()
         history.append(record)
         print(json.dumps(record), flush=True)
         pd.DataFrame(history).to_csv(args.out / "history.csv", index=False)
-        if val_loss < best_loss:
-            best_loss = val_loss
+        key = selection_key(record, args.selection_metric)
+        if key > best_key:
+            best_key = key
             bundle = args.out / "best_bundle"
             model.save_pretrained(bundle / "qwen_adapter")
             tokenizer.save_pretrained(bundle / "qwen_adapter")
