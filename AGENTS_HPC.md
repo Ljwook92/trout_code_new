@@ -539,6 +539,11 @@ quality_gt is an expert's image-specific `readable` or `bad` annotation, never a
 model prediction. Original labels 0..5 imply directly labeled readable scales;
 6 denotes bad. Missing labels imply unknown quality unless separately annotated.
 
+For the new **SimCLR feature input -> Qwen trained against expert GT** architecture,
+see [FEATURE_QWEN_HPC.md](FEATURE_QWEN_HPC.md). It bypasses Qwen's image encoder
+and trains a projector plus language LoRA; it does not use teacher pseudo-labels.
+The old image-based inference scripts are not compatible with its saved bundle.
+
 Only separately confirmed readable scales can receive an age from the same fish
 when all its direct expert ages agree. Quality is never propagated. Conflicting
 fish are flagged and excluded from age training pending expert review. Unassigned
