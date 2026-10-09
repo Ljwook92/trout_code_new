@@ -1,5 +1,8 @@
 # SimCLR features to Qwen, supervised by expert GT
 
+For the connected bounded quality/age/review/expert-feedback workflow, see
+[FEATURE_AGENTS_HPC.md](FEATURE_AGENTS_HPC.md).
+
 This is a new input architecture, not the previous image-based LoRA/debate model.
 Images enter a frozen, trained SimCLR ResNet18 only. Qwen's visual encoder is
 bypassed. A trainable projector maps a global 512-dimensional vector and 49
